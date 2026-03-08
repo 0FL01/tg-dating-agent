@@ -1806,3 +1806,60 @@ func TestBootstrapWithActionsAllowsNilSearch(t *testing.T) {
 		t.Fatalf("steps = %v, want [start]", steps)
 	}
 }
+
+func TestExtractBioText(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "empty", in: "", want: ""},
+		{name: "only spaces", in: "   ", want: ""},
+		{name: "profile with en dash", in: "Ксюша, 23, Нижний Новгород – Исключительно общение", want: "Исключительно общение"},
+		{name: "profile with hyphen", in: "Ксюша, 23, Нижний Новгород - Исключительно общение", want: "Исключительно общение"},
+		{name: "bio only", in: "Ищу серьезные отношения", want: "Ищу серьезные отношения"},
+		{name: "separator no bio", in: "Ксюша, 23, Нижний Новгород –   ", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := extractBioText(tt.in); got != tt.want {
+				t.Fatalf("extractBioText() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsLowQualityUsesBioOnly(t *testing.T) {
+	h := &Handler{config: &standalone.Config{DatingSkipLowQuality: true, DatingMinBioLength: 50}}
+
+	shortBio := "Ксюша, 23, Нижний Новгород – Коротко о себе"
+	if !h.isLowQuality(shortBio) {
+		t.Fatalf("isLowQuality(%q) = false, want true", shortBio)
+	}
+
+	longBio := "Ксюша, 23, Нижний Новгород – " + strings.Repeat("а", 60)
+	if h.isLowQuality(longBio) {
+		t.Fatalf("isLowQuality(%q) = true, want false", longBio)
+	}
+}
+
+func TestIsLowQualityEmptyTextWhenEnabled(t *testing.T) {
+	h := &Handler{config: &standalone.Config{DatingSkipLowQuality: true, DatingMinBioLength: 50}}
+
+	if !h.isLowQuality("") {
+		t.Fatal("isLowQuality(\"\") = false, want true")
+	}
+}
+
+func TestIsLowQualityDisabled(t *testing.T) {
+	h := &Handler{config: &standalone.Config{DatingSkipLowQuality: false, DatingMinBioLength: 50}}
+
+	if h.isLowQuality("") {
+		t.Fatal("isLowQuality disabled should return false for empty text")
+	}
+
+	if h.isLowQuality("коротко") {
+		t.Fatal("isLowQuality disabled should return false for short text")
+	}
+}

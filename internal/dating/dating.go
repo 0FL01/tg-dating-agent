@@ -240,9 +240,13 @@ func isDailyLimitMessage(text string) bool {
 }
 
 func (h *Handler) processProfile(ctx context.Context, m *telegram.NewMessage) error {
-	if h.isLowQuality(m.Text()) {
-		log.Printf("[%s] Skipping low quality profile (len=%d): %s...",
-			h.Name(), utf8.RuneCountInString(m.Text()), utils.Truncate(m.Text(), 20))
+	profileText := m.Text()
+	bioText := extractBioText(profileText)
+	bioLen := utf8.RuneCountInString(bioText)
+
+	if h.isLowQuality(profileText) {
+		log.Printf("[%s] Skipping low quality profile (bio_len=%d, min=%d): %s...",
+			h.Name(), bioLen, h.config.DatingMinBioLength, utils.Truncate(profileText, 20))
 		if !h.state.SetStateIfNotStopped(StateViewingProfiles) {
 			return nil
 		}
@@ -813,14 +817,12 @@ func (h *Handler) handleAlbumJob(ctx context.Context, a *telegram.Album) error {
 	h.cacheBotPeerFromAlbum(a)
 
 	profileText := h.resolveAlbumProfileText(a)
+	bioText := extractBioText(profileText)
+	bioLen := utf8.RuneCountInString(bioText)
 
-	if strings.TrimSpace(profileText) == "" {
-		log.Printf("[%s] Album text is empty after caption resolution, continuing with photos only", h.Name())
-	}
-
-	if strings.TrimSpace(profileText) != "" && h.isLowQuality(profileText) {
-		log.Printf("[%s] Skipping low quality album profile (len=%d): %s...",
-			h.Name(), utf8.RuneCountInString(profileText), utils.Truncate(profileText, 20))
+	if h.isLowQuality(profileText) {
+		log.Printf("[%s] Skipping low quality album profile (bio_len=%d, min=%d): %s...",
+			h.Name(), bioLen, h.config.DatingMinBioLength, utils.Truncate(profileText, 20))
 		if !h.state.SetStateIfNotStopped(StateViewingProfiles) {
 			return nil
 		}
@@ -1285,8 +1287,28 @@ func (h *Handler) isLowQuality(text string) bool {
 	if !h.config.DatingSkipLowQuality {
 		return false
 	}
-	trimmed := strings.TrimSpace(text)
-	return utf8.RuneCountInString(trimmed) < h.config.DatingMinBioLength
+	bioText := extractBioText(text)
+	return utf8.RuneCountInString(bioText) < h.config.DatingMinBioLength
+}
+
+func extractBioText(profileText string) string {
+	trimmed := strings.TrimSpace(profileText)
+	if trimmed == "" {
+		return ""
+	}
+
+	separators := []string{" – ", " — ", " - ", "–", "—", "-"}
+	for _, sep := range separators {
+		idx := strings.Index(trimmed, sep)
+		if idx < 0 {
+			continue
+		}
+
+		bio := strings.TrimSpace(trimmed[idx+len(sep):])
+		return bio
+	}
+
+	return trimmed
 }
 
 func writableTempDownloadDir() string {
