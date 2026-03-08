@@ -498,6 +498,64 @@ func TestHandleGenericTooManyLikesPausesBeforeRecovery(t *testing.T) {
 	}
 }
 
+func TestHandlePausedSkipsGenericRecovery(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+	h.state.PauseFor(time.Hour)
+
+	err := h.Handle(&telegram.NewMessage{Message: &telegram.MessageObj{Message: "Interstitial text"}})
+	if err != nil {
+		t.Fatalf("Handle() error = %v, want nil", err)
+	}
+
+	if got := h.state.GetState(); got != StateViewingProfiles {
+		t.Fatalf("state = %v, want %v", got, StateViewingProfiles)
+	}
+}
+
+func TestHandleDailyLimitTakesPrecedenceOverViewProfilesAndRecovery(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+	h.state.SetPendingMessage("draft")
+	h.state.SetProfileData(&ProfileData{ProfileText: "bio", PhotoPaths: []string{"/tmp/photo.jpg"}})
+	h.state.IncrementRetry()
+
+	msg := &telegram.NewMessage{Message: &telegram.MessageObj{
+		Message: "Too many likes today. Invite your friends for more hearts. " + PatternViewProfiles,
+		ReplyMarkup: &telegram.ReplyKeyboardMarkup{
+			Rows: []*telegram.KeyboardButtonRow{
+				{Buttons: []telegram.KeyboardButton{&telegram.KeyboardButtonObj{Text: ButtonViewProfiles}}},
+			},
+		},
+	}}
+
+	err := h.Handle(msg)
+	if err != nil {
+		t.Fatalf("Handle() error = %v, want nil", err)
+	}
+
+	if got := h.state.GetState(); got != StateIdle {
+		t.Fatalf("state = %v, want %v", got, StateIdle)
+	}
+
+	if got := h.state.GetPendingMessage(); got != "" {
+		t.Fatalf("pending message = %q, want empty", got)
+	}
+
+	if got := h.state.GetProfileData(); got != nil {
+		t.Fatalf("profile data = %#v, want nil", got)
+	}
+
+	if got := h.state.GetRetryCount(); got != 0 {
+		t.Fatalf("retry count = %d, want 0", got)
+	}
+
+	paused, resumed, until := h.state.CheckPause(time.Now())
+	if !paused || resumed || until.IsZero() {
+		t.Fatalf("CheckPause(now) = (%v, %v, %v), want (true, false, non-zero)", paused, resumed, until)
+	}
+}
+
 func TestFinalizeSendStateResetsConversationInvariant(t *testing.T) {
 	h := &Handler{state: NewStateMachine()}
 	h.state.SetState(StateWaitingPrompt)
@@ -647,6 +705,16 @@ func TestBootstrapWithActionsSkipsWhenPaused(t *testing.T) {
 
 	if called != 0 {
 		t.Fatalf("bootstrap actions called %d times, want 0", called)
+	}
+}
+
+func TestBootstrapSkipsActionsWhenPaused(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.PauseFor(time.Hour)
+
+	err := h.Bootstrap()
+	if err != nil {
+		t.Fatalf("Bootstrap() error = %v, want nil", err)
 	}
 }
 
