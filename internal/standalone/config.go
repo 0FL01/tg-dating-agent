@@ -117,19 +117,8 @@ func Load() (*Config, error) {
 		model = DefaultOpenRouterModel
 	}
 
-	// Dating: Bot Chat ID
-	datingBotChatID := DefaultDatingBotChatID
-	if v := os.Getenv("DATING_BOT_CHAT_ID"); v != "" {
-		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
-			datingBotChatID = parsed
-		}
-	}
-
-	// Dating: Bot Username
-	datingBotUsername := DefaultDatingBotUsername
-	if v := os.Getenv("DATING_BOT_USERNAME"); v != "" {
-		datingBotUsername = v
-	}
+	// Dating bot settings are hardcoded for Leomatch (@leomatchbot)
+	// Chat ID: 1234060895, Username: leomatchbot
 
 	// Dating: Model
 	datingModel := os.Getenv("DATING_MODEL")
@@ -198,8 +187,8 @@ func Load() (*Config, error) {
 		StringSession:        stringSession,
 		OpenRouterAPIKey:     apiKey,
 		OpenRouterModel:      model,
-		DatingBotChatID:      datingBotChatID,
-		DatingBotUsername:    datingBotUsername,
+		DatingBotChatID:      DefaultDatingBotChatID,
+		DatingBotUsername:    DefaultDatingBotUsername,
 		DatingModel:          datingModel,
 		DatingPrompt:         datingPrompt,
 		DatingMBTIPrompt:     datingMBTIPrompt,

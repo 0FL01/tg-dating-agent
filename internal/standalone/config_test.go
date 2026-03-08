@@ -163,7 +163,6 @@ func TestLoadDatingDefaults(t *testing.T) {
 func TestLoadDatingCustomValues(t *testing.T) {
 	setRequiredEnv(t)
 
-	t.Setenv("DATING_BOT_CHAT_ID", "999999")
 	t.Setenv("DATING_MODEL", "custom/model")
 	t.Setenv("DATING_PROMPT", "custom prompt")
 	t.Setenv("DATING_MBTI_PROMPT", "custom mbti prompt")
@@ -178,8 +177,9 @@ func TestLoadDatingCustomValues(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if cfg.DatingBotChatID != 999999 {
-		t.Errorf("DatingBotChatID = %d, want 999999", cfg.DatingBotChatID)
+	// DatingBotChatID is hardcoded, not configurable via env
+	if cfg.DatingBotChatID != DefaultDatingBotChatID {
+		t.Errorf("DatingBotChatID = %d, want %d (hardcoded default)", cfg.DatingBotChatID, DefaultDatingBotChatID)
 	}
 	if cfg.DatingModel != "custom/model" {
 		t.Errorf("DatingModel = %s, want custom/model", cfg.DatingModel)
