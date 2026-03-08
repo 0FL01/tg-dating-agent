@@ -120,6 +120,47 @@ func TestShouldRecoverFromStuck(t *testing.T) {
 			want:    false,
 		},
 		{
+			name:  "viewing state with text-only subscribe interstitial",
+			state: StateViewingProfiles,
+			message: &telegram.NewMessage{Message: &telegram.MessageObj{
+				Message: "Subscribe to my channel for more matches",
+			}},
+			want: true,
+		},
+		{
+			name:  "viewing state with text-only internet safety interstitial",
+			state: StateViewingProfiles,
+			message: &telegram.NewMessage{Message: &telegram.MessageObj{
+				Message: "Please note that people on the internet can pretend to be someone else.",
+			}},
+			want: true,
+		},
+		{
+			name:  "viewing state with text-only tiktok promo interstitial",
+			state: StateViewingProfiles,
+			message: &telegram.NewMessage{Message: &telegram.MessageObj{
+				Message: "Do you want more views on TikTok? #Leomatch",
+			}},
+			want: true,
+		},
+		{
+			name:  "viewing state with unknown text-only notice",
+			state: StateViewingProfiles,
+			message: &telegram.NewMessage{Message: &telegram.MessageObj{
+				Message: "This is a generic informational notice.",
+			}},
+			want: false,
+		},
+		{
+			name:  "viewing state with known text but non-empty markup",
+			state: StateViewingProfiles,
+			message: &telegram.NewMessage{Message: &telegram.MessageObj{
+				Message:     "Do you want more views on TikTok? #Leomatch",
+				ReplyMarkup: &telegram.ReplyInlineMarkup{},
+			}},
+			want: false,
+		},
+		{
 			name:  "non viewing state with view profiles button",
 			state: StateIdle,
 			message: &telegram.NewMessage{
@@ -131,6 +172,14 @@ func TestShouldRecoverFromStuck(t *testing.T) {
 					},
 				},
 			},
+			want: false,
+		},
+		{
+			name:  "non viewing state with text-only interstitial",
+			state: StateIdle,
+			message: &telegram.NewMessage{Message: &telegram.MessageObj{
+				Message: "Subscribe to my channel for more matches",
+			}},
 			want: false,
 		},
 	}
