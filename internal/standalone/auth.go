@@ -58,6 +58,8 @@ func BuildTelegramClientConfig(cfg ClientConfig) telegram.ClientConfig {
 		AppID:     cfg.AppID,
 		AppHash:   cfg.AppHash,
 		ParseMode: "Markdown",
+		// Disable on-disk cache to support read-only container filesystems.
+		DisableCache: true,
 		// FloodHandler handles FLOOD_WAIT errors by sleeping the exact time Telegram requests
 		FloodHandler: func(err error) bool {
 			var seconds int

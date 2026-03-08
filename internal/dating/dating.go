@@ -3,6 +3,7 @@ package dating
 import (
 	"context"
 	"log"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -159,7 +160,7 @@ func (h *Handler) downloadProfileData(ctx context.Context, m *telegram.NewMessag
 	var photoPaths []string
 
 	photoPath, err := tghelper.RetryTelegram(ctx, "download_photo", func() (string, error) {
-		return m.Download()
+		return m.Download(&telegram.DownloadOptions{FileName: writableTempDownloadDir()})
 	})
 	if err != nil {
 		log.Printf("[%s] Failed to download photo: %v", h.Name(), err)
@@ -471,7 +472,7 @@ func (h *Handler) downloadAlbumData(ctx context.Context, a *telegram.Album) (Pro
 	for _, msg := range a.Messages {
 		if msg.Photo() != nil {
 			path, err := tghelper.RetryTelegram(ctx, "download_album_photo", func() (string, error) {
-				return msg.Download()
+				return msg.Download(&telegram.DownloadOptions{FileName: writableTempDownloadDir()})
 			})
 			if err == nil && path != "" {
 				photoPaths = append(photoPaths, path)
@@ -503,4 +504,8 @@ func (h *Handler) isLowQuality(text string) bool {
 	}
 	trimmed := strings.TrimSpace(text)
 	return utf8.RuneCountInString(trimmed) < h.config.DatingMinBioLength
+}
+
+func writableTempDownloadDir() string {
+	return os.TempDir() + string(os.PathSeparator)
 }
