@@ -2,6 +2,7 @@ package dating
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -25,35 +26,43 @@ var jitterRand = rand.New(rand.NewSource(time.Now().UnixNano()))
 
 // Handler handles the dating bot automation
 type Handler struct {
-	config      *standalone.Config
-	client      llm.MultimodalSummarizer
-	tgClient    *telegram.Client
-	state       *StateMachine
-	chatID      int64
-	botUsername string
-	model       string
-	prompt      string
-	actionDelay time.Duration
-	jitterDelay time.Duration
-	temperature float64
-	botPeerMu   sync.RWMutex
-	botPeer     telegram.InputPeer
+	config          *standalone.Config
+	client          llm.MultimodalSummarizer
+	tgClient        *telegram.Client
+	state           *StateMachine
+	chatID          int64
+	botUsername     string
+	model           string
+	prompt          string
+	actionDelay     time.Duration
+	jitterDelay     time.Duration
+	temperature     float64
+	sendMessageFn   func(context.Context, telegram.InputPeer, string) error
+	botPeerMu       sync.RWMutex
+	botPeer         telegram.InputPeer
+	lifecycleMu     sync.Mutex
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
 }
 
 // NewHandler creates a new dating handler
 func NewHandler(cfg *standalone.Config, client llm.MultimodalSummarizer, tgClient *telegram.Client) *Handler {
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+
 	return &Handler{
-		config:      cfg,
-		client:      client,
-		tgClient:    tgClient,
-		state:       NewStateMachine(),
-		chatID:      cfg.DatingBotChatID,
-		botUsername: cfg.DatingBotUsername,
-		model:       cfg.DatingModel,
-		prompt:      cfg.DatingPrompt,
-		actionDelay: cfg.DatingActionDelay,
-		jitterDelay: cfg.DatingJitterDelay,
-		temperature: cfg.DatingTemperature,
+		config:          cfg,
+		client:          client,
+		tgClient:        tgClient,
+		state:           NewStateMachine(),
+		chatID:          cfg.DatingBotChatID,
+		botUsername:     cfg.DatingBotUsername,
+		model:           cfg.DatingModel,
+		prompt:          cfg.DatingPrompt,
+		actionDelay:     cfg.DatingActionDelay,
+		jitterDelay:     cfg.DatingJitterDelay,
+		temperature:     cfg.DatingTemperature,
+		lifecycleCtx:    lifecycleCtx,
+		lifecycleCancel: lifecycleCancel,
 	}
 }
 
@@ -115,12 +124,12 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 
 	if strings.Contains(strings.ToLower(text), PatternTooLong) {
 		log.Printf("[%s] Message was too long, retrying...", h.Name())
-		return h.retryGenerateMessage(RetryTooLong)
+		return h.retryGenerateMessage(h.lifecycleContext(), RetryTooLong)
 	}
 
 	if strings.Contains(strings.ToLower(text), PatternTooShort) {
 		log.Printf("[%s] Message was too short, retrying with different prompt...", h.Name())
-		return h.retryGenerateMessage(RetryTooShort)
+		return h.retryGenerateMessage(h.lifecycleContext(), RetryTooShort)
 	}
 
 	if strings.Contains(text, PatternWriteMessage) {
@@ -216,16 +225,19 @@ func isDailyLimitMessage(text string) bool {
 	return hasTodayCue && hasInviteCue
 }
 
-func (h *Handler) processProfile(m *telegram.NewMessage) error {
+func (h *Handler) processProfile(ctx context.Context, m *telegram.NewMessage) error {
 	if h.isLowQuality(m.Text()) {
 		log.Printf("[%s] Skipping low quality profile (len=%d): %s...",
 			h.Name(), utf8.RuneCountInString(m.Text()), utils.Truncate(m.Text(), 20))
-		h.state.SetState(StateViewingProfiles)
-		return h.clickButton(ButtonDislike)
+		if !h.state.SetStateIfNotStopped(StateViewingProfiles) {
+			return nil
+		}
+		return h.clickButtonWithContext(ctx, ButtonDislike)
 	}
 
-	ctx := context.Background()
-	h.state.SetState(StateViewingProfiles)
+	if !h.state.SetStateIfNotStopped(StateViewingProfiles) {
+		return nil
+	}
 
 	data, cleanup := h.downloadProfileData(ctx, m)
 	defer cleanup()
@@ -266,40 +278,48 @@ func (h *Handler) generateAndSendLike(ctx context.Context, data ProfileData) err
 		ImagePaths: data.PhotoPaths,
 	}
 
-	mbtiRaw, err := h.client.SummarizeMultimodal(h.model, h.config.DatingMBTIPrompt, content, h.temperature)
+	mbtiRaw, err := h.client.SummarizeMultimodal(ctx, h.model, h.config.DatingMBTIPrompt, content, h.temperature)
 	if err != nil {
 		log.Printf("[%s] Failed to analyze MBTI: %v, skipping profile", h.Name(), err)
-		return h.clickButton(ButtonDislike)
+		return h.clickButtonWithContext(ctx, ButtonDislike)
 	}
 
 	mbti, ok := parseMBTI(mbtiRaw)
 	if !ok {
 		log.Printf("[%s] Failed to parse MBTI from response %q, skipping profile", h.Name(), utils.Truncate(mbtiRaw, 60))
-		return h.clickButton(ButtonDislike)
+		return h.clickButtonWithContext(ctx, ButtonDislike)
 	}
 
 	if !isMBTIAllowed(mbti, h.config.DatingMBTIAllowlist) {
 		log.Printf("[%s] MBTI %s is not in allowlist %v, skipping profile", h.Name(), mbti, h.config.DatingMBTIAllowlist)
-		return h.clickButton(ButtonDislike)
+		return h.clickButtonWithContext(ctx, ButtonDislike)
 	}
 
 	log.Printf("[%s] MBTI %s is allowed, generating reply", h.Name(), mbti)
+	if shouldStopWorker(ctx, h.state.ShouldQuit()) || h.state.IsStopped() {
+		return nil
+	}
 
 	h.state.SetProfileData(&data)
 	h.state.ResetRetry()
 
-	generatedMsg, err := h.client.SummarizeMultimodal(h.model, h.prompt, content, h.temperature)
+	generatedMsg, err := h.client.SummarizeMultimodal(ctx, h.model, h.prompt, content, h.temperature)
 	if err != nil {
 		log.Printf("[%s] Failed to generate message: %v", h.Name(), err)
-		return h.clickButton(ButtonDislike)
+		return h.clickButtonWithContext(ctx, ButtonDislike)
 	}
 
 	log.Printf("[%s] Generated message: %s", h.Name(), utils.Truncate(generatedMsg, 100))
+	if shouldStopWorker(ctx, h.state.ShouldQuit()) || h.state.IsStopped() {
+		return nil
+	}
 
 	h.state.SetPendingMessage(generatedMsg)
-	h.state.SetState(StateWaitingPrompt)
+	if !h.state.SetStateIfNotStopped(StateWaitingPrompt) {
+		return nil
+	}
 
-	return h.clickButton(ButtonLikeMessage)
+	return h.clickButtonWithContext(ctx, ButtonLikeMessage)
 }
 
 func parseMBTI(response string) (string, bool) {
@@ -350,22 +370,35 @@ func (h *Handler) sendPendingMessage(m *telegram.NewMessage) error {
 		return nil
 	}
 
+	ctx := h.lifecycleContext()
+	if h.shouldStopProcessing(ctx) {
+		return nil
+	}
+
 	log.Printf("[%s] Sending message: %s (delay: %v)", h.Name(), utils.Truncate(msg, 50), h.actionDelay)
 
-	time.Sleep(h.actionDelay)
+	if !waitForDelayWithContext(h.actionDelay, ctx) {
+		return nil
+	}
 
-	ctx := context.Background()
+	if h.shouldStopProcessing(ctx) {
+		return nil
+	}
+
 	peer, ok := h.getBotPeer()
 	if !ok {
 		err := fmt.Errorf("dating peer is not cached yet for chat %d", h.chatID)
 		log.Printf("[%s] %v", h.Name(), err)
 		return err
 	}
-	_, err := tghelper.RetryTelegram(ctx, "send_dating_message", func() (*telegram.NewMessage, error) {
-		return h.tgClient.SendMessage(peer, msg)
-	})
+	err := h.sendDatingMessage(ctx, peer, msg)
+	if err == nil {
+		h.finalizeSendState()
+	}
 
-	h.finalizeSendState()
+	if h.shouldStopProcessing(ctx) {
+		return nil
+	}
 
 	if err != nil {
 		log.Printf("[%s] Failed to send message: %v", h.Name(), err)
@@ -451,7 +484,23 @@ func (h *Handler) finalizeSendState() {
 	h.state.FinalizeSendState(StateWaitingPrompt)
 }
 
-func (h *Handler) retryGenerateMessage(retryType RetryType) error {
+func (h *Handler) sendDatingMessage(ctx context.Context, peer telegram.InputPeer, msg string) error {
+	if h.sendMessageFn != nil {
+		return h.sendMessageFn(ctx, peer, msg)
+	}
+
+	_, err := tghelper.RetryTelegram(ctx, "send_dating_message", func() (*telegram.NewMessage, error) {
+		return h.tgClient.SendMessage(peer, msg)
+	})
+
+	return err
+}
+
+func (h *Handler) retryGenerateMessage(ctx context.Context, retryType RetryType) error {
+	if h.shouldStopProcessing(ctx) {
+		return nil
+	}
+
 	retryCount := h.state.IncrementRetry()
 	pendingMsg := h.state.GetPendingMessage()
 
@@ -459,13 +508,13 @@ func (h *Handler) retryGenerateMessage(retryType RetryType) error {
 
 	if retryCount > MaxRetries {
 		log.Printf("[%s] Max retries reached, using fallback", h.Name())
-		return h.handleMaxRetriesReached(retryType, pendingMsg)
+		return h.handleMaxRetriesReached(ctx, retryType, pendingMsg)
 	}
 
 	profileData := h.state.GetProfileData()
 	if profileData == nil {
 		log.Printf("[%s] No profile data for retry, using fallback", h.Name())
-		return h.handleMaxRetriesReached(retryType, pendingMsg)
+		return h.handleMaxRetriesReached(ctx, retryType, pendingMsg)
 	}
 
 	var retryPrompt string
@@ -481,49 +530,77 @@ func (h *Handler) retryGenerateMessage(retryType RetryType) error {
 		ImagePaths: profileData.PhotoPaths,
 	}
 
-	generatedMsg, err := h.client.SummarizeMultimodal(h.model, retryPrompt, content, h.temperature)
+	generatedMsg, err := h.client.SummarizeMultimodal(ctx, h.model, retryPrompt, content, h.temperature)
 	if err != nil {
+		if h.shouldStopProcessing(ctx) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil
+		}
 		log.Printf("[%s] Failed to regenerate message: %v, using fallback", h.Name(), err)
-		return h.handleMaxRetriesReached(retryType, pendingMsg)
+		return h.handleMaxRetriesReached(ctx, retryType, pendingMsg)
 	}
 
 	log.Printf("[%s] Regenerated message (attempt %d): %s", h.Name(), retryCount, utils.Truncate(generatedMsg, 100))
+	if h.shouldStopProcessing(ctx) {
+		return nil
+	}
 
 	h.state.SetPendingMessage(generatedMsg)
-	return h.sendTruncatedMessage(generatedMsg)
+	return h.sendTruncatedMessage(ctx, generatedMsg)
 }
 
-func (h *Handler) handleMaxRetriesReached(retryType RetryType, pendingMsg string) error {
+func (h *Handler) handleMaxRetriesReached(ctx context.Context, retryType RetryType, pendingMsg string) error {
+	if h.shouldStopProcessing(ctx) {
+		return nil
+	}
+
 	switch retryType {
 	case RetryTooLong:
 		truncatedMsg := truncateMessage(pendingMsg, MaxMsgLength)
+		if h.shouldStopProcessing(ctx) {
+			return nil
+		}
 		h.state.SetPendingMessage(truncatedMsg)
-		return h.sendTruncatedMessage(truncatedMsg)
+		return h.sendTruncatedMessage(ctx, truncatedMsg)
 	case RetryTooShort:
 		fallbackMsg := "Привет! Заинтересовал(а) твой профиль, давай познакомимся? 😊"
+		if h.shouldStopProcessing(ctx) {
+			return nil
+		}
 		h.state.SetPendingMessage(fallbackMsg)
-		return h.sendTruncatedMessage(fallbackMsg)
+		return h.sendTruncatedMessage(ctx, fallbackMsg)
 	}
 	return nil
 }
 
-func (h *Handler) sendTruncatedMessage(msg string) error {
+func (h *Handler) sendTruncatedMessage(ctx context.Context, msg string) error {
+	if h.shouldStopProcessing(ctx) {
+		return nil
+	}
+
 	log.Printf("[%s] Sending message directly: %s (delay: %v)", h.Name(), utils.Truncate(msg, 50), h.actionDelay)
 
-	time.Sleep(h.actionDelay)
+	if !waitForDelayWithContext(h.actionDelay, ctx) {
+		return nil
+	}
 
-	ctx := context.Background()
+	if h.shouldStopProcessing(ctx) {
+		return nil
+	}
+
 	peer, ok := h.getBotPeer()
 	if !ok {
 		err := fmt.Errorf("dating peer is not cached yet for chat %d", h.chatID)
 		log.Printf("[%s] %v", h.Name(), err)
 		return err
 	}
-	_, err := tghelper.RetryTelegram(ctx, "send_dating_message", func() (*telegram.NewMessage, error) {
-		return h.tgClient.SendMessage(peer, msg)
-	})
+	err := h.sendDatingMessage(ctx, peer, msg)
+	if err == nil {
+		h.finalizeSendState()
+	}
 
-	h.finalizeSendState()
+	if h.shouldStopProcessing(ctx) {
+		return nil
+	}
 
 	if err != nil {
 		log.Printf("[%s] Failed to send message: %v", h.Name(), err)
@@ -556,12 +633,15 @@ func truncateMessage(msg string, maxLen int) string {
 }
 
 func (h *Handler) clickButton(buttonText string) error {
+	return h.clickButtonWithContext(h.lifecycleContext(), buttonText)
+}
+
+func (h *Handler) clickButtonWithContext(ctx context.Context, buttonText string) error {
 	log.Printf("[%s] Clicking button: %s", h.Name(), buttonText)
 
 	// Note: Rate limiting is now handled in worker loop via getProcessingDelay()
 	// This method no longer includes time.Sleep to avoid double delays
 
-	ctx := context.Background()
 	peer, err := h.ensureBotPeer(ctx)
 	if err != nil {
 		log.Printf("[%s] %v", h.Name(), err)
@@ -624,10 +704,15 @@ func (h *Handler) bootstrapWithActions(sendStart func() error, startSearch func(
 
 func (h *Handler) sendBootstrapCommand(command string) error {
 	log.Printf("[%s] Sending bootstrap command: %s (delay: %v)", h.Name(), command, h.actionDelay)
+	ctx := h.lifecycleContext()
+	if h.shouldStopProcessing(ctx) {
+		return nil
+	}
 
-	time.Sleep(h.actionDelay)
+	if !waitForDelayWithContext(h.actionDelay, ctx) {
+		return nil
+	}
 
-	ctx := context.Background()
 	peer, err := h.ensureBotPeer(ctx)
 	if err != nil {
 		return err
@@ -672,7 +757,7 @@ func (h *Handler) HandleAlbum(a *telegram.Album) error {
 }
 
 // handleAlbumJob performs actual album processing (inside worker)
-func (h *Handler) handleAlbumJob(a *telegram.Album) error {
+func (h *Handler) handleAlbumJob(ctx context.Context, a *telegram.Album) error {
 	h.cacheBotPeerFromAlbum(a)
 
 	profileText := profileTextFromAlbumMessages(a.Messages)
@@ -680,12 +765,15 @@ func (h *Handler) handleAlbumJob(a *telegram.Album) error {
 	if h.isLowQuality(profileText) {
 		log.Printf("[%s] Skipping low quality album profile (len=%d): %s...",
 			h.Name(), utf8.RuneCountInString(profileText), utils.Truncate(profileText, 20))
-		h.state.SetState(StateViewingProfiles)
-		return h.clickButton(ButtonDislike)
+		if !h.state.SetStateIfNotStopped(StateViewingProfiles) {
+			return nil
+		}
+		return h.clickButtonWithContext(ctx, ButtonDislike)
 	}
 
-	ctx := context.Background()
-	h.state.SetState(StateViewingProfiles)
+	if !h.state.SetStateIfNotStopped(StateViewingProfiles) {
+		return nil
+	}
 
 	data, cleanup := h.downloadAlbumData(ctx, a, profileText)
 	defer cleanup()
@@ -696,24 +784,24 @@ func (h *Handler) handleAlbumJob(a *telegram.Album) error {
 }
 
 // processJob processes jobs from the queue sequentially
-func (h *Handler) processJob(job ProfileJob) error {
+func (h *Handler) processJob(ctx context.Context, job ProfileJob) error {
 	switch job.Type {
 	case "message":
 		if job.Message == nil {
 			return nil
 		}
-		return h.processProfile(job.Message)
+		return h.processProfile(ctx, job.Message)
 	case "album":
 		if job.Album == nil {
 			return nil
 		}
-		return h.handleAlbumJob(job.Album)
+		return h.handleAlbumJob(ctx, job.Album)
 	case "menu_recovery":
 		log.Printf("[%s] Processing menu recovery job", h.Name())
-		return h.clickButton(ButtonViewProfiles)
+		return h.clickButtonWithContext(ctx, ButtonViewProfiles)
 	case "stuck_recovery":
 		log.Printf("[%s] Processing stuck recovery job", h.Name())
-		return h.clickButton(ButtonViewProfiles)
+		return h.clickButtonWithContext(ctx, ButtonViewProfiles)
 	default:
 		log.Printf("[%s] Unknown job type: %s", h.Name(), job.Type)
 		return nil
@@ -722,32 +810,167 @@ func (h *Handler) processJob(job ProfileJob) error {
 
 // StartWorker starts a goroutine to process the profile queue
 func (h *Handler) StartWorker() {
+	if !h.state.MarkWorkerStarted() {
+		return
+	}
+
 	go func() {
 		log.Printf("[%s] Worker started", h.Name())
-		defer log.Printf("[%s] Worker stopped", h.Name())
+		defer func() {
+			h.state.MarkWorkerStopped()
+			log.Printf("[%s] Worker stopped", h.Name())
+		}()
+
+		quit := h.state.ShouldQuit()
+		queue := h.state.GetQueue()
+		workerCtx := h.state.WorkerContext()
 
 		for {
 			select {
-			case job := <-h.state.GetQueue():
-				// Rate limiting: wait before processing each profile
-				delay := h.getProcessingDelay()
-				log.Printf("[%s] Rate limiting: waiting %v before processing", h.Name(), delay)
-				time.Sleep(delay)
+			case <-quit:
+				return
+			case <-workerCtx.Done():
+				return
+			case job := <-queue:
+				if shouldStopWorker(workerCtx, quit) || h.state.IsStopped() {
+					return
+				}
 
 				log.Printf("[%s] Processing job type: %s", h.Name(), job.Type)
-				if err := h.processJob(job); err != nil {
+				if err := h.processJob(workerCtx, job); err != nil {
 					log.Printf("[%s] Job processing error: %v", h.Name(), err)
 				}
-			case <-h.state.ShouldQuit():
-				return
+
+				delay := h.getProcessingDelay()
+				log.Printf("[%s] Rate limiting: waiting %v before processing", h.Name(), delay)
+				if !waitForDelayOrStop(delay, workerCtx, quit) {
+					return
+				}
 			}
 		}
 	}()
 }
 
+func waitForDelayOrStop(delay time.Duration, ctx context.Context, quit <-chan struct{}) bool {
+	if delay <= 0 {
+		return !shouldStopWorker(ctx, quit)
+	}
+
+	timer := time.NewTimer(delay)
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-quit:
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func shouldStopWorker(ctx context.Context, quit <-chan struct{}) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	case <-quit:
+		return true
+	default:
+		return false
+	}
+}
+
 // StopWorker stops the worker goroutine
 func (h *Handler) StopWorker() {
 	h.state.StopWorker()
+}
+
+func (h *Handler) WaitWorkerStop() {
+	h.state.WaitWorkerStop()
+}
+
+// Shutdown stops accepting new work and then stops worker processing.
+func (h *Handler) Shutdown() {
+	h.state.BeginShutdown()
+	h.cancelLifecycleContext()
+	h.state.CancelWorkerContext()
+	h.StopWorker()
+	h.WaitWorkerStop()
+}
+
+func (h *Handler) lifecycleContext() context.Context {
+	h.lifecycleMu.Lock()
+	defer h.lifecycleMu.Unlock()
+
+	if h.lifecycleCtx == nil {
+		h.lifecycleCtx, h.lifecycleCancel = context.WithCancel(context.Background())
+	}
+
+	return h.lifecycleCtx
+}
+
+func (h *Handler) cancelLifecycleContext() {
+	h.lifecycleMu.Lock()
+	defer h.lifecycleMu.Unlock()
+
+	if h.lifecycleCancel != nil {
+		h.lifecycleCancel()
+		h.lifecycleCancel = nil
+	}
+}
+
+func (h *Handler) shouldStopProcessing(ctx context.Context) bool {
+	if h.state.IsStopped() {
+		return true
+	}
+
+	if ctx == nil {
+		return false
+	}
+
+	select {
+	case <-ctx.Done():
+		return true
+	case <-h.state.ShouldQuit():
+		return true
+	default:
+		return false
+	}
+}
+
+func waitForDelayWithContext(delay time.Duration, ctx context.Context) bool {
+	if delay <= 0 {
+		return ctx == nil || ctx.Err() == nil
+	}
+
+	timer := time.NewTimer(delay)
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
+
+	if ctx == nil {
+		<-timer.C
+		return true
+	}
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func (h *Handler) cacheBotPeerFromAlbum(a *telegram.Album) {

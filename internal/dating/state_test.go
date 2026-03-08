@@ -1,6 +1,7 @@
 package dating
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -80,5 +81,68 @@ func TestStateMachineOwnProfileSkipInterleavingWrongFirstMedia(t *testing.T) {
 
 	if got := sm.ConsumeOwnProfileSkip(102, now.Add(3*time.Second)); got {
 		t.Fatal("ConsumeOwnProfileSkip() = true after successful consume, want false")
+	}
+}
+
+func TestStateMachineEnqueueRejectsAfterStopAcceptingWork(t *testing.T) {
+	sm := NewStateMachine()
+
+	if ok := sm.Enqueue(ProfileJob{Type: "message"}); !ok {
+		t.Fatal("initial Enqueue() = false, want true")
+	}
+
+	sm.StopAcceptingWork()
+
+	if ok := sm.Enqueue(ProfileJob{Type: "message"}); ok {
+		t.Fatal("Enqueue() after StopAcceptingWork = true, want false")
+	}
+}
+
+func TestStateMachineEnqueueRejectsAfterStopAcceptingWorkConcurrently(t *testing.T) {
+	sm := NewStateMachine()
+	sm.StopAcceptingWork()
+
+	const workers = 32
+	var wg sync.WaitGroup
+	successes := make(chan struct{}, workers)
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if sm.Enqueue(ProfileJob{Type: "message"}) {
+				successes <- struct{}{}
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(successes)
+
+	if len(successes) != 0 {
+		t.Fatalf("successful Enqueue() count = %d, want 0", len(successes))
+	}
+}
+
+func TestStateMachineBeginShutdownAtomicallyStopsAndRejectsEnqueue(t *testing.T) {
+	sm := NewStateMachine()
+	sm.MarkOwnProfileSkip(123, time.Now())
+
+	sm.BeginShutdown()
+
+	if got := sm.GetState(); got != StateStopped {
+		t.Fatalf("state after BeginShutdown() = %v, want %v", got, StateStopped)
+	}
+
+	if sm.acceptingWork {
+		t.Fatal("acceptingWork after BeginShutdown() = true, want false")
+	}
+
+	if got := sm.ConsumeOwnProfileSkip(124, time.Now()); got {
+		t.Fatal("own-profile skip context still active after BeginShutdown()")
+	}
+
+	if ok := sm.Enqueue(ProfileJob{Type: "message"}); ok {
+		t.Fatal("Enqueue() after BeginShutdown() = true, want false")
 	}
 }

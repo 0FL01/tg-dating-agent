@@ -1,6 +1,7 @@
 package dating
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -52,8 +53,13 @@ type StateMachine struct {
 	pausedUntil    time.Time
 	ownProfileSkip ownProfileSkipContext
 	// New fields for worker pool pattern:
-	profileQueue chan ProfileJob // buffered channel for profile queue
-	quitChan     chan struct{}   // for graceful shutdown
+	profileQueue  chan ProfileJob // buffered channel for profile queue
+	quitChan      chan struct{}   // for graceful shutdown
+	workerDone    chan struct{}
+	workerActive  bool
+	acceptingWork bool
+	workerCtx     context.Context
+	workerCancel  context.CancelFunc
 }
 
 const ownProfileSkipTTL = 45 * time.Second
@@ -66,10 +72,15 @@ type ownProfileSkipContext struct {
 }
 
 func NewStateMachine() *StateMachine {
+	workerDone := make(chan struct{})
+	close(workerDone)
+
 	return &StateMachine{
-		state:        StateIdle,
-		profileQueue: make(chan ProfileJob, 50), // buffer for 50 profiles
-		quitChan:     make(chan struct{}),
+		state:         StateIdle,
+		profileQueue:  make(chan ProfileJob, 50), // buffer for 50 profiles
+		quitChan:      make(chan struct{}),
+		workerDone:    workerDone,
+		acceptingWork: true,
 	}
 }
 
@@ -89,6 +100,23 @@ func (sm *StateMachine) SetState(state State) {
 	if state == StateStopped || state == StateIdle {
 		sm.ownProfileSkip = ownProfileSkipContext{}
 	}
+}
+
+func (sm *StateMachine) SetStateIfNotStopped(state State) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if sm.state == StateStopped {
+		return false
+	}
+
+	sm.state = state
+
+	if state == StateIdle {
+		sm.ownProfileSkip = ownProfileSkipContext{}
+	}
+
+	return true
 }
 
 func (sm *StateMachine) GetPendingMessage() string {
@@ -114,14 +142,37 @@ func (sm *StateMachine) IsStopped() bool {
 }
 
 // Enqueue adds a job to the profile queue.
-// Returns true if job was added, false if queue is full.
+// Returns true if job was added, false if queue is full or shutdown has started.
 func (sm *StateMachine) Enqueue(job ProfileJob) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if sm.state == StateStopped || !sm.acceptingWork {
+		return false
+	}
+
 	select {
 	case sm.profileQueue <- job:
 		return true
 	default:
 		return false // queue is full
 	}
+}
+
+func (sm *StateMachine) StopAcceptingWork() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.acceptingWork = false
+}
+
+// BeginShutdown performs the shutdown state transition atomically.
+func (sm *StateMachine) BeginShutdown() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.state = StateStopped
+	sm.acceptingWork = false
+	sm.ownProfileSkip = ownProfileSkipContext{}
 }
 
 // GetQueue returns the receive-only channel for the profile queue
@@ -131,7 +182,89 @@ func (sm *StateMachine) GetQueue() <-chan ProfileJob {
 
 // StopWorker signals the worker goroutine to stop
 func (sm *StateMachine) StopWorker() {
-	close(sm.quitChan)
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	select {
+	case <-sm.quitChan:
+		return
+	default:
+		close(sm.quitChan)
+	}
+}
+
+func (sm *StateMachine) MarkWorkerStarted() bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if sm.workerActive {
+		return false
+	}
+
+	if !sm.acceptingWork {
+		return false
+	}
+
+	select {
+	case <-sm.quitChan:
+		return false
+	default:
+	}
+
+	sm.workerDone = make(chan struct{})
+	sm.workerActive = true
+	sm.workerCtx, sm.workerCancel = context.WithCancel(context.Background())
+	return true
+}
+
+func (sm *StateMachine) MarkWorkerStopped() {
+	sm.mu.Lock()
+	if !sm.workerActive {
+		sm.mu.Unlock()
+		return
+	}
+	sm.workerActive = false
+	workerDone := sm.workerDone
+	cancel := sm.workerCancel
+	sm.workerCtx = nil
+	sm.workerCancel = nil
+	sm.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+
+	close(workerDone)
+}
+
+func (sm *StateMachine) WaitWorkerStop() {
+	sm.mu.RLock()
+	workerDone := sm.workerDone
+	sm.mu.RUnlock()
+
+	<-workerDone
+}
+
+func (sm *StateMachine) WorkerContext() context.Context {
+	sm.mu.RLock()
+	ctx := sm.workerCtx
+	sm.mu.RUnlock()
+
+	if ctx == nil {
+		return context.Background()
+	}
+
+	return ctx
+}
+
+func (sm *StateMachine) CancelWorkerContext() {
+	sm.mu.RLock()
+	cancel := sm.workerCancel
+	sm.mu.RUnlock()
+
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // ShouldQuit returns the channel that signals worker to stop

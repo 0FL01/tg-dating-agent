@@ -1,6 +1,7 @@
 package dating
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -8,10 +9,36 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/0FL01/tg-dating-agent/internal/llm"
+	"github.com/0FL01/tg-dating-agent/internal/standalone"
 	"github.com/amarnathcjd/gogram/telegram"
 )
 
 const testSyncTimeout = 2 * time.Second
+
+type blockingSummarizer struct {
+	startedOnce  sync.Once
+	canceledOnce sync.Once
+	started      chan struct{}
+	canceled     chan struct{}
+	release      chan struct{}
+}
+
+func (s *blockingSummarizer) SummarizeMultimodal(ctx context.Context, _ string, _ string, _ llm.MultimodalContent, _ float64) (string, error) {
+	s.startedOnce.Do(func() {
+		close(s.started)
+	})
+
+	select {
+	case <-ctx.Done():
+		s.canceledOnce.Do(func() {
+			close(s.canceled)
+		})
+		return "", ctx.Err()
+	case <-s.release:
+		return "INTJ", nil
+	}
+}
 
 func TestTruncateMessageASCII(t *testing.T) {
 	tests := []struct {
@@ -1012,7 +1039,7 @@ func TestSendTruncatedMessageCacheMissPreservesState(t *testing.T) {
 	h.state.SetProfileData(&ProfileData{ProfileText: "bio", PhotoPaths: []string{"/tmp/photo.jpg"}})
 	h.state.IncrementRetry()
 
-	err := h.sendTruncatedMessage("truncated")
+	err := h.sendTruncatedMessage(context.Background(), "truncated")
 	if err == nil {
 		t.Fatal("sendTruncatedMessage() error = nil, want non-nil")
 	}
@@ -1035,6 +1062,76 @@ func TestSendTruncatedMessageCacheMissPreservesState(t *testing.T) {
 
 	if got := h.state.GetState(); got != StateWaitingPrompt {
 		t.Fatalf("state = %v, want %v", got, StateWaitingPrompt)
+	}
+}
+
+func TestSendPendingMessageSuccessfulSendFollowedByShutdownFinalizesState(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.SetState(StateWaitingPrompt)
+	h.state.SetPendingMessage("draft")
+	h.state.SetProfileData(&ProfileData{ProfileText: "bio", PhotoPaths: []string{"/tmp/photo.jpg"}})
+	h.state.IncrementRetry()
+	h.setBotPeer(&telegram.InputPeerUser{UserID: h.chatID, AccessHash: 1})
+
+	h.sendMessageFn = func(_ context.Context, _ telegram.InputPeer, _ string) error {
+		h.Shutdown()
+		return nil
+	}
+
+	err := h.sendPendingMessage(&telegram.NewMessage{Message: &telegram.MessageObj{}})
+	if err != nil {
+		t.Fatalf("sendPendingMessage() error = %v, want nil", err)
+	}
+
+	if got := h.state.GetPendingMessage(); got != "" {
+		t.Fatalf("pending message = %q, want empty", got)
+	}
+
+	if got := h.state.GetProfileData(); got != nil {
+		t.Fatalf("profile data = %#v, want nil", got)
+	}
+
+	if got := h.state.GetRetryCount(); got != 0 {
+		t.Fatalf("retry count = %d, want 0", got)
+	}
+
+	if got := h.state.GetState(); got != StateStopped {
+		t.Fatalf("state = %v, want %v", got, StateStopped)
+	}
+}
+
+func TestSendTruncatedMessageSuccessfulSendFollowedByShutdownFinalizesState(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.SetState(StateWaitingPrompt)
+	h.state.SetPendingMessage("truncated")
+	h.state.SetProfileData(&ProfileData{ProfileText: "bio", PhotoPaths: []string{"/tmp/photo.jpg"}})
+	h.state.IncrementRetry()
+	h.setBotPeer(&telegram.InputPeerUser{UserID: h.chatID, AccessHash: 1})
+
+	h.sendMessageFn = func(_ context.Context, _ telegram.InputPeer, _ string) error {
+		h.Shutdown()
+		return nil
+	}
+
+	err := h.sendTruncatedMessage(context.Background(), "truncated")
+	if err != nil {
+		t.Fatalf("sendTruncatedMessage() error = %v, want nil", err)
+	}
+
+	if got := h.state.GetPendingMessage(); got != "" {
+		t.Fatalf("pending message = %q, want empty", got)
+	}
+
+	if got := h.state.GetProfileData(); got != nil {
+		t.Fatalf("profile data = %#v, want nil", got)
+	}
+
+	if got := h.state.GetRetryCount(); got != 0 {
+		t.Fatalf("retry count = %d, want 0", got)
+	}
+
+	if got := h.state.GetState(); got != StateStopped {
+		t.Fatalf("state = %v, want %v", got, StateStopped)
 	}
 }
 
@@ -1071,6 +1168,238 @@ func TestFinalizeSendStateDoesNotOverrideTerminalStates(t *testing.T) {
 
 			if got := h.state.GetState(); got != tt.initialState {
 				t.Fatalf("state = %v, want %v", got, tt.initialState)
+			}
+		})
+	}
+}
+
+func TestShutdownSetsStoppedAndStopsWorker(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+
+	h.Shutdown()
+
+	if got := h.state.GetState(); got != StateStopped {
+		t.Fatalf("state after Shutdown() = %v, want %v", got, StateStopped)
+	}
+
+	select {
+	case <-h.state.ShouldQuit():
+		// expected
+	default:
+		t.Fatal("quit channel was not closed by Shutdown()")
+	}
+}
+
+func TestShutdownCancelsWorkerContext(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+	h.StartWorker()
+
+	ctx := h.state.WorkerContext()
+
+	h.Shutdown()
+
+	select {
+	case <-ctx.Done():
+		// expected
+	case <-time.After(testSyncTimeout):
+		t.Fatal("worker context was not canceled by Shutdown()")
+	}
+}
+
+func TestHandleConcurrentWithShutdownRejectsLateEnqueue(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	msg := &telegram.NewMessage{ID: 1, Message: &telegram.MessageObj{
+		Media:  &telegram.MessageMediaPhoto{},
+		PeerID: &telegram.PeerUser{UserID: h.chatID},
+	}}
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		h.Shutdown()
+		close(shutdownDone)
+	}()
+	mustReceiveSignal(t, shutdownDone, "Shutdown completion")
+
+	if ok := h.state.Enqueue(ProfileJob{Type: "message", Message: msg}); ok {
+		t.Fatal("Enqueue() after Shutdown() = true, want false")
+	}
+
+	before := len(h.state.profileQueue)
+
+	const postShutdownCalls = 32
+	var wg sync.WaitGroup
+	errCh := make(chan error, postShutdownCalls)
+	for i := 0; i < postShutdownCalls; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- h.Handle(msg)
+		}()
+	}
+
+	waitGroupWithTimeout(t, &wg, "post-shutdown Handle calls")
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("Handle() after Shutdown() error = %v", err)
+		}
+	}
+
+	after := len(h.state.profileQueue)
+	if after != before {
+		t.Fatalf("queue length changed after Handle() post-shutdown: before=%d after=%d", before, after)
+	}
+}
+
+func TestStartWorkerQuitPrioritySkipsQueuedJobsAfterStopSignal(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+
+	if ok := h.state.Enqueue(ProfileJob{Type: "message"}); !ok {
+		t.Fatal("Enqueue() = false, want true")
+	}
+
+	h.StopWorker()
+	h.StartWorker()
+	h.WaitWorkerStop()
+
+	if got := len(h.state.profileQueue); got != 1 {
+		t.Fatalf("queue length after quit-priority start = %d, want 1", got)
+	}
+}
+
+func TestShutdownWaitsForWorkerStopAndInterruptsDelay(t *testing.T) {
+	h := &Handler{
+		state:       NewStateMachine(),
+		actionDelay: 500 * time.Millisecond,
+	}
+
+	h.StartWorker()
+	if ok := h.state.Enqueue(ProfileJob{Type: "message"}); !ok {
+		t.Fatal("Enqueue() = false, want true")
+	}
+
+	deadline := time.Now().Add(testSyncTimeout)
+	for len(h.state.profileQueue) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("worker did not dequeue job before shutdown")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	startedAt := time.Now()
+	h.Shutdown()
+	elapsed := time.Since(startedAt)
+
+	if elapsed >= h.actionDelay/2 {
+		t.Fatalf("Shutdown() took %v with pending delay %v, want interruptible stop faster than %v", elapsed, h.actionDelay, h.actionDelay/2)
+	}
+}
+
+func TestShutdownCancelsInFlightWorkerJobAndKeepsStoppedState(t *testing.T) {
+	summarizer := &blockingSummarizer{
+		started:  make(chan struct{}),
+		canceled: make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+
+	h := &Handler{
+		state: NewStateMachine(),
+		config: &standalone.Config{
+			DatingMBTIPrompt:     "mbti",
+			DatingMBTIAllowlist:  []string{"INTJ"},
+			DatingSkipLowQuality: false,
+		},
+		client:      summarizer,
+		model:       "model",
+		prompt:      "prompt",
+		temperature: 0.3,
+	}
+
+	h.StartWorker()
+	if ok := h.state.Enqueue(ProfileJob{Type: "album", Album: &telegram.Album{Messages: []*telegram.NewMessage{{
+		ID: 1,
+		Message: &telegram.MessageObj{
+			Message: "profile text",
+		},
+	}}}}); !ok {
+		t.Fatal("Enqueue() = false, want true")
+	}
+
+	mustReceiveSignal(t, summarizer.started, "blocking summarizer start")
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		h.Shutdown()
+		close(shutdownDone)
+	}()
+
+	mustReceiveSignal(t, summarizer.canceled, "blocking summarizer cancellation")
+	mustReceiveSignal(t, shutdownDone, "Shutdown completion")
+
+	if got := h.state.GetState(); got != StateStopped {
+		t.Fatalf("state after Shutdown() = %v, want %v", got, StateStopped)
+	}
+}
+
+func TestHandleRetryMessageShutdownCancelsLifecycleAndPreventsPostStopSend(t *testing.T) {
+	tests := []struct {
+		name        string
+		incomingMsg string
+	}{
+		{name: "too long", incomingMsg: PatternTooLong},
+		{name: "too short", incomingMsg: PatternTooShort},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			summarizer := &blockingSummarizer{
+				started:  make(chan struct{}),
+				canceled: make(chan struct{}),
+				release:  make(chan struct{}),
+			}
+
+			h := &Handler{
+				state: NewStateMachine(),
+				config: &standalone.Config{
+					DatingMBTIPrompt:     "mbti",
+					DatingMBTIAllowlist:  []string{"INTJ"},
+					DatingSkipLowQuality: false,
+				},
+				client:      summarizer,
+				model:       "model",
+				temperature: 0.3,
+			}
+			h.state.SetState(StateWaitingPrompt)
+			h.state.SetPendingMessage("draft")
+			h.state.SetProfileData(&ProfileData{ProfileText: "bio"})
+
+			handleDone := make(chan error, 1)
+			go func() {
+				handleDone <- h.Handle(&telegram.NewMessage{Message: &telegram.MessageObj{Message: tt.incomingMsg}})
+			}()
+
+			mustReceiveSignal(t, summarizer.started, "retry summarizer start")
+
+			h.Shutdown()
+
+			mustReceiveSignal(t, summarizer.canceled, "retry summarizer cancel")
+
+			select {
+			case err := <-handleDone:
+				if err != nil {
+					t.Fatalf("Handle() error = %v, want nil", err)
+				}
+			case <-time.After(testSyncTimeout):
+				t.Fatal("Handle() did not return after Shutdown()")
+			}
+
+			if got := h.state.GetState(); got != StateStopped {
+				t.Fatalf("state after Shutdown() = %v, want %v", got, StateStopped)
+			}
+
+			if got := h.state.GetPendingMessage(); got != "draft" {
+				t.Fatalf("pending message after Shutdown() = %q, want unchanged %q", got, "draft")
 			}
 		})
 	}
