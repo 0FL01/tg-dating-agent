@@ -95,15 +95,6 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 		return nil
 	}
 
-	if strings.Contains(strings.ToLower(text), PatternTooManyLikes) {
-		log.Printf("[%s] Daily like limit reached, stopping", h.Name())
-		h.state.ClearPendingMessage()
-		h.state.ClearProfileData()
-		h.state.ResetRetry()
-		h.state.SetState(StateStopped)
-		return nil
-	}
-
 	if strings.Contains(strings.ToLower(text), PatternTooLong) {
 		log.Printf("[%s] Message was too long, retrying...", h.Name())
 		return h.retryGenerateMessage(RetryTooLong)
@@ -169,12 +160,16 @@ func isDailyLimitMessage(text string) bool {
 		return false
 	}
 
-	hasHeart := strings.Contains(text, "❤️") || strings.Contains(text, "❤")
-	if !hasHeart {
-		return false
+	hasLikeCue := strings.Contains(normalized, "like")
+	hasHeartCue := strings.Contains(text, "❤️") || strings.Contains(text, "❤") || strings.Contains(normalized, "heart")
+	hasTodayCue := strings.Contains(normalized, "today")
+	hasInviteCue := strings.Contains(normalized, "invite") || strings.Contains(normalized, "share") || strings.Contains(normalized, "friend") || strings.Contains(normalized, "personal link")
+
+	if hasLikeCue || (hasHeartCue && (hasTodayCue || hasInviteCue)) {
+		return true
 	}
 
-	return strings.Contains(normalized, "today") || strings.Contains(normalized, "invite")
+	return hasTodayCue && hasInviteCue
 }
 
 func (h *Handler) processProfile(m *telegram.NewMessage) error {

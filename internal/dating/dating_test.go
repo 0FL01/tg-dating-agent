@@ -395,7 +395,12 @@ func TestIsDailyLimitMessage(t *testing.T) {
 		{
 			name: "too many with today but no heart",
 			text: "Too many likes today, try again tomorrow",
-			want: false,
+			want: true,
+		},
+		{
+			name: "too many with invite cues but no heart",
+			text: "Too many today. Invite friends to get more tomorrow.",
+			want: true,
 		},
 		{
 			name: "too many with heart but unrelated",
@@ -458,7 +463,7 @@ func TestHandleDailyLimitPausesAndResetsState(t *testing.T) {
 	}
 }
 
-func TestHandleGenericTooManyStopsWithoutPause(t *testing.T) {
+func TestHandleGenericTooManyLikesPausesBeforeRecovery(t *testing.T) {
 	h := &Handler{state: NewStateMachine()}
 	h.state.SetState(StateViewingProfiles)
 	h.state.SetPendingMessage("draft")
@@ -471,8 +476,8 @@ func TestHandleGenericTooManyStopsWithoutPause(t *testing.T) {
 		t.Fatalf("Handle() error = %v", err)
 	}
 
-	if got := h.state.GetState(); got != StateStopped {
-		t.Fatalf("state = %v, want %v", got, StateStopped)
+	if got := h.state.GetState(); got != StateIdle {
+		t.Fatalf("state = %v, want %v", got, StateIdle)
 	}
 
 	if got := h.state.GetPendingMessage(); got != "" {
@@ -488,8 +493,8 @@ func TestHandleGenericTooManyStopsWithoutPause(t *testing.T) {
 	}
 
 	paused, resumed, until := h.state.CheckPause(time.Now())
-	if paused || resumed || !until.IsZero() {
-		t.Fatalf("CheckPause(now) = (%v, %v, %v), want (false, false, zero)", paused, resumed, until)
+	if !paused || resumed || until.IsZero() {
+		t.Fatalf("CheckPause(now) = (%v, %v, %v), want (true, false, non-zero)", paused, resumed, until)
 	}
 }
 
