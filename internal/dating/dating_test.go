@@ -1,6 +1,7 @@
 package dating
 
 import (
+	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -41,6 +42,117 @@ func TestTruncateMessageASCII(t *testing.T) {
 				t.Fatalf("truncateMessage(%q, %d) = %q, want %q", tt.msg, tt.maxLen, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGetBotPeerEmptyCache(t *testing.T) {
+	h := &Handler{chatID: 123456789}
+
+	peer, ok := h.getBotPeer()
+	if ok {
+		t.Fatal("getBotPeer() ok = true, want false")
+	}
+
+	if peer != nil {
+		t.Fatalf("getBotPeer() peer = %#v, want nil", peer)
+	}
+}
+
+func TestCacheBotPeerStoresResolvedPeerForTargetChat(t *testing.T) {
+	h := &Handler{chatID: 123456789}
+	resolved := &telegram.InputPeerUser{UserID: 42, AccessHash: 77}
+
+	h.cacheBotPeer(&telegram.NewMessage{
+		Peer: resolved,
+		Message: &telegram.MessageObj{
+			PeerID: &telegram.PeerUser{UserID: h.chatID},
+		},
+	})
+
+	peer, ok := h.getBotPeer()
+	if !ok {
+		t.Fatal("getBotPeer() ok = false, want true")
+	}
+
+	userPeer, typeOK := peer.(*telegram.InputPeerUser)
+	if !typeOK {
+		t.Fatalf("getBotPeer() type = %T, want *telegram.InputPeerUser", peer)
+	}
+
+	if userPeer.UserID != resolved.UserID || userPeer.AccessHash != resolved.AccessHash {
+		t.Fatalf("cached peer = %#v, want %#v", userPeer, resolved)
+	}
+}
+
+func TestCacheBotPeerIgnoresMismatchedOrMissingPeer(t *testing.T) {
+	h := &Handler{chatID: 123456789}
+	initial := &telegram.InputPeerUser{UserID: 1, AccessHash: 2}
+
+	h.cacheBotPeer(&telegram.NewMessage{
+		Peer: initial,
+		Message: &telegram.MessageObj{
+			PeerID: &telegram.PeerUser{UserID: h.chatID},
+		},
+	})
+
+	h.cacheBotPeer(&telegram.NewMessage{
+		Peer: &telegram.InputPeerUser{UserID: 999, AccessHash: 999},
+		Message: &telegram.MessageObj{
+			PeerID: &telegram.PeerUser{UserID: 555},
+		},
+	})
+
+	h.cacheBotPeer(&telegram.NewMessage{
+		Peer: nil,
+		Message: &telegram.MessageObj{
+			PeerID: &telegram.PeerUser{UserID: h.chatID},
+		},
+	})
+
+	peer, ok := h.getBotPeer()
+	if !ok {
+		t.Fatal("getBotPeer() ok = false, want true")
+	}
+
+	userPeer, typeOK := peer.(*telegram.InputPeerUser)
+	if !typeOK {
+		t.Fatalf("getBotPeer() type = %T, want *telegram.InputPeerUser", peer)
+	}
+
+	if userPeer.UserID != initial.UserID || userPeer.AccessHash != initial.AccessHash {
+		t.Fatalf("cached peer = %#v, want %#v", userPeer, initial)
+	}
+}
+
+func TestHandleAlbumCachesBotPeerBeforeEarlyReturn(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.SetState(StateStopped)
+	resolved := &telegram.InputPeerUser{UserID: 42, AccessHash: 77}
+
+	err := h.HandleAlbum(&telegram.Album{Messages: []*telegram.NewMessage{
+		{
+			Peer: resolved,
+			Message: &telegram.MessageObj{
+				PeerID: &telegram.PeerUser{UserID: h.chatID},
+			},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("HandleAlbum() error = %v", err)
+	}
+
+	peer, ok := h.getBotPeer()
+	if !ok {
+		t.Fatal("getBotPeer() ok = false, want true")
+	}
+
+	userPeer, typeOK := peer.(*telegram.InputPeerUser)
+	if !typeOK {
+		t.Fatalf("getBotPeer() type = %T, want *telegram.InputPeerUser", peer)
+	}
+
+	if userPeer.UserID != resolved.UserID || userPeer.AccessHash != resolved.AccessHash {
+		t.Fatalf("cached peer = %#v, want %#v", userPeer, resolved)
 	}
 }
 
@@ -419,6 +531,72 @@ func TestFinalizeSendStateResetsConversationInvariant(t *testing.T) {
 
 	if got := h.state.GetState(); got != StateViewingProfiles {
 		t.Fatalf("state = %v, want %v", got, StateViewingProfiles)
+	}
+}
+
+func TestSendPendingMessageCacheMissPreservesState(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.SetState(StateWaitingPrompt)
+	h.state.SetPendingMessage("draft")
+	h.state.SetProfileData(&ProfileData{ProfileText: "bio", PhotoPaths: []string{"/tmp/photo.jpg"}})
+	h.state.IncrementRetry()
+
+	err := h.sendPendingMessage(&telegram.NewMessage{Message: &telegram.MessageObj{}})
+	if err == nil {
+		t.Fatal("sendPendingMessage() error = nil, want non-nil")
+	}
+
+	if !strings.Contains(err.Error(), "dating peer is not cached yet") {
+		t.Fatalf("sendPendingMessage() error = %v, want cache miss error", err)
+	}
+
+	if got := h.state.GetPendingMessage(); got != "draft" {
+		t.Fatalf("pending message = %q, want %q", got, "draft")
+	}
+
+	if got := h.state.GetProfileData(); got == nil || got.ProfileText != "bio" {
+		t.Fatalf("profile data = %#v, want non-nil bio", got)
+	}
+
+	if got := h.state.GetRetryCount(); got != 1 {
+		t.Fatalf("retry count = %d, want 1", got)
+	}
+
+	if got := h.state.GetState(); got != StateWaitingPrompt {
+		t.Fatalf("state = %v, want %v", got, StateWaitingPrompt)
+	}
+}
+
+func TestSendTruncatedMessageCacheMissPreservesState(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.SetState(StateWaitingPrompt)
+	h.state.SetPendingMessage("truncated")
+	h.state.SetProfileData(&ProfileData{ProfileText: "bio", PhotoPaths: []string{"/tmp/photo.jpg"}})
+	h.state.IncrementRetry()
+
+	err := h.sendTruncatedMessage("truncated")
+	if err == nil {
+		t.Fatal("sendTruncatedMessage() error = nil, want non-nil")
+	}
+
+	if !strings.Contains(err.Error(), "dating peer is not cached yet") {
+		t.Fatalf("sendTruncatedMessage() error = %v, want cache miss error", err)
+	}
+
+	if got := h.state.GetPendingMessage(); got != "truncated" {
+		t.Fatalf("pending message = %q, want %q", got, "truncated")
+	}
+
+	if got := h.state.GetProfileData(); got == nil || got.ProfileText != "bio" {
+		t.Fatalf("profile data = %#v, want non-nil bio", got)
+	}
+
+	if got := h.state.GetRetryCount(); got != 1 {
+		t.Fatalf("retry count = %d, want 1", got)
+	}
+
+	if got := h.state.GetState(); got != StateWaitingPrompt {
+		t.Fatalf("state = %v, want %v", got, StateWaitingPrompt)
 	}
 }
 

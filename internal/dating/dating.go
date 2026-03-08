@@ -2,9 +2,11 @@ package dating
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -28,6 +30,8 @@ type Handler struct {
 	prompt      string
 	actionDelay time.Duration
 	temperature float64
+	botPeerMu   sync.RWMutex
+	botPeer     telegram.InputPeer
 }
 
 // NewHandler creates a new dating handler
@@ -53,6 +57,7 @@ func (h *Handler) Name() string {
 // Filter returns a filter function for incoming messages from dating bot
 func (h *Handler) Filter() func(*telegram.NewMessage) bool {
 	return func(m *telegram.NewMessage) bool {
+		h.cacheBotPeer(m)
 		log.Printf("[dating] Filter check: ChatID=%d, SenderID=%d, expected=%d",
 			m.ChatID(), m.SenderID(), h.chatID)
 		return m.ChatID() == h.chatID
@@ -61,6 +66,8 @@ func (h *Handler) Filter() func(*telegram.NewMessage) bool {
 
 // Handle processes incoming messages from the dating bot
 func (h *Handler) Handle(m *telegram.NewMessage) error {
+	h.cacheBotPeer(m)
+
 	if h.state.IsStopped() {
 		return nil
 	}
@@ -322,8 +329,14 @@ func (h *Handler) sendPendingMessage(m *telegram.NewMessage) error {
 	time.Sleep(h.actionDelay)
 
 	ctx := context.Background()
+	peer, ok := h.getBotPeer()
+	if !ok {
+		err := fmt.Errorf("dating peer is not cached yet for chat %d", h.chatID)
+		log.Printf("[%s] %v", h.Name(), err)
+		return err
+	}
 	_, err := tghelper.RetryTelegram(ctx, "send_dating_message", func() (*telegram.NewMessage, error) {
-		return h.tgClient.SendMessage(h.chatID, msg)
+		return h.tgClient.SendMessage(peer, msg)
 	})
 
 	h.finalizeSendState()
@@ -335,6 +348,23 @@ func (h *Handler) sendPendingMessage(m *telegram.NewMessage) error {
 
 	log.Printf("[%s] Message sent successfully", h.Name())
 	return nil
+}
+
+func (h *Handler) cacheBotPeer(m *telegram.NewMessage) {
+	if m == nil || m.ChatID() != h.chatID || m.Peer == nil {
+		return
+	}
+
+	h.botPeerMu.Lock()
+	h.botPeer = m.Peer
+	h.botPeerMu.Unlock()
+}
+
+func (h *Handler) getBotPeer() (telegram.InputPeer, bool) {
+	h.botPeerMu.RLock()
+	peer := h.botPeer
+	h.botPeerMu.RUnlock()
+	return peer, peer != nil
 }
 
 func (h *Handler) finalizeSendState() {
@@ -403,8 +433,14 @@ func (h *Handler) sendTruncatedMessage(msg string) error {
 	time.Sleep(h.actionDelay)
 
 	ctx := context.Background()
+	peer, ok := h.getBotPeer()
+	if !ok {
+		err := fmt.Errorf("dating peer is not cached yet for chat %d", h.chatID)
+		log.Printf("[%s] %v", h.Name(), err)
+		return err
+	}
 	_, err := tghelper.RetryTelegram(ctx, "send_dating_message", func() (*telegram.NewMessage, error) {
-		return h.tgClient.SendMessage(h.chatID, msg)
+		return h.tgClient.SendMessage(peer, msg)
 	})
 
 	h.finalizeSendState()
@@ -445,8 +481,14 @@ func (h *Handler) clickButton(buttonText string) error {
 	time.Sleep(h.actionDelay)
 
 	ctx := context.Background()
+	peer, ok := h.getBotPeer()
+	if !ok {
+		err := fmt.Errorf("dating peer is not cached yet for chat %d", h.chatID)
+		log.Printf("[%s] %v", h.Name(), err)
+		return err
+	}
 	_, err := tghelper.RetryTelegram(ctx, "click_button", func() (*telegram.NewMessage, error) {
-		return h.tgClient.SendMessage(h.chatID, buttonText)
+		return h.tgClient.SendMessage(peer, buttonText)
 	})
 
 	if err != nil {
@@ -467,6 +509,8 @@ func (h *Handler) Start() {
 }
 
 func (h *Handler) HandleAlbum(a *telegram.Album) error {
+	h.cacheBotPeerFromAlbum(a)
+
 	if h.state.IsStopped() {
 		return nil
 	}
@@ -505,6 +549,16 @@ func (h *Handler) HandleAlbum(a *telegram.Album) error {
 	log.Printf("[%s] Album: %d photos, text: %s", h.Name(), len(data.PhotoPaths), utils.Truncate(data.ProfileText, 100))
 
 	return h.generateAndSendLike(ctx, data)
+}
+
+func (h *Handler) cacheBotPeerFromAlbum(a *telegram.Album) {
+	if a == nil {
+		return
+	}
+
+	for _, msg := range a.Messages {
+		h.cacheBotPeer(msg)
+	}
 }
 
 func (h *Handler) isPaused() bool {
