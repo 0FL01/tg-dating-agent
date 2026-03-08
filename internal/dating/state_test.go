@@ -231,3 +231,26 @@ func TestStateMachineStartupOwnProfileSkipClearedExplicitly(t *testing.T) {
 		t.Fatal("ConsumeStartupOwnProfileSkip() = true after Clear, want false")
 	}
 }
+
+func TestStateMachineTryMarkProfileJobProcessingRejectsStaleAndDuplicate(t *testing.T) {
+	sm := NewStateMachine()
+
+	if ok := sm.Enqueue(ProfileJob{Type: "message", ProfileMessageID: 101}); !ok {
+		t.Fatal("Enqueue(id=101) = false, want true")
+	}
+	if ok := sm.Enqueue(ProfileJob{Type: "message", ProfileMessageID: 105}); !ok {
+		t.Fatal("Enqueue(id=105) = false, want true")
+	}
+
+	if accepted, latest, last := sm.TryMarkProfileJobProcessing(101); accepted {
+		t.Fatalf("TryMarkProfileJobProcessing(101) accepted=true, want false (latest=%d last=%d)", latest, last)
+	}
+
+	if accepted, _, _ := sm.TryMarkProfileJobProcessing(105); !accepted {
+		t.Fatal("TryMarkProfileJobProcessing(105) accepted=false, want true")
+	}
+
+	if accepted, latest, last := sm.TryMarkProfileJobProcessing(105); accepted {
+		t.Fatalf("TryMarkProfileJobProcessing(105 duplicate) accepted=true, want false (latest=%d last=%d)", latest, last)
+	}
+}

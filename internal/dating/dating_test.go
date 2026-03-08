@@ -256,6 +256,9 @@ func TestHandleAlbumOwnProfileSkipUsesSameCorrelationRule(t *testing.T) {
 	if job1.Type != "album" || job1.Album == nil || len(job1.Album.Messages) == 0 || job1.Album.Messages[0].ID != 310 {
 		t.Fatalf("first queued job = %+v, want album with id 310", job1)
 	}
+	if job1.ProfileMessageID != 310 {
+		t.Fatalf("album job ProfileMessageID = %d, want 310", job1.ProfileMessageID)
+	}
 
 	job2 := mustDequeueJob(t, h.state)
 	if job2.Type != "menu_recovery" {
@@ -319,6 +322,9 @@ func TestHandleNonGroupedMediaStillEnqueuesMessageJob(t *testing.T) {
 	job := mustDequeueJob(t, h.state)
 	if job.Type != "message" || job.Message == nil || job.Message.ID != 402 {
 		t.Fatalf("queued job = %+v, want message job id 402", job)
+	}
+	if job.ProfileMessageID != 402 {
+		t.Fatalf("message job ProfileMessageID = %d, want 402", job.ProfileMessageID)
 	}
 }
 
@@ -409,6 +415,20 @@ func TestFirstAlbumGroupedIDUsesLowestMessageID(t *testing.T) {
 
 	if got := firstAlbumGroupedID(album); got != 2 {
 		t.Fatalf("firstAlbumGroupedID() = %d, want 2", got)
+	}
+}
+
+func TestMaxAlbumMessageIDUsesHighestMessageID(t *testing.T) {
+	album := &telegram.Album{
+		Messages: []*telegram.NewMessage{
+			{ID: 250, Message: &telegram.MessageObj{}},
+			{ID: 300, Message: &telegram.MessageObj{}},
+			{ID: 275, Message: &telegram.MessageObj{}},
+		},
+	}
+
+	if got := maxAlbumMessageID(album); got != 300 {
+		t.Fatalf("maxAlbumMessageID() = %d, want 300", got)
 	}
 }
 

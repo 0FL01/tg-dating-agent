@@ -39,9 +39,10 @@ type ProfileData struct {
 
 // ProfileJob represents a job to process a profile from the queue
 type ProfileJob struct {
-	Type    string               // "message" or "album"
-	Message *telegram.NewMessage // nil for album jobs
-	Album   *telegram.Album      // nil for message jobs
+	Type             string               // "message" or "album"
+	Message          *telegram.NewMessage // nil for album jobs
+	Album            *telegram.Album      // nil for message jobs
+	ProfileMessageID int32                // anchor message ID for stale/duplicate suppression
 }
 
 type StateMachine struct {
@@ -63,6 +64,8 @@ type StateMachine struct {
 	recoveryQueued        map[string]bool
 	groupedCaptions       map[int64]groupedCaptionContext
 	startupOwnProfileSkip startupOwnProfileSkipContext
+	latestProfileJobID    int32
+	lastProcessedJobID    int32
 }
 
 const ownProfileSkipTTL = 45 * time.Second
@@ -121,6 +124,8 @@ func (sm *StateMachine) SetState(state State) {
 	if state == StateStopped || state == StateIdle {
 		sm.ownProfileSkip = ownProfileSkipContext{}
 		sm.startupOwnProfileSkip = startupOwnProfileSkipContext{}
+		sm.latestProfileJobID = 0
+		sm.lastProcessedJobID = 0
 	}
 }
 
@@ -137,6 +142,8 @@ func (sm *StateMachine) SetStateIfNotStopped(state State) bool {
 	if state == StateIdle {
 		sm.ownProfileSkip = ownProfileSkipContext{}
 		sm.startupOwnProfileSkip = startupOwnProfileSkipContext{}
+		sm.latestProfileJobID = 0
+		sm.lastProcessedJobID = 0
 	}
 
 	return true
@@ -183,6 +190,13 @@ func (sm *StateMachine) Enqueue(job ProfileJob) bool {
 		sm.recoveryQueued[job.Type] = true
 	}
 
+	updatedLatestProfileID := false
+	previousLatestProfileID := sm.latestProfileJobID
+	if isProfileJobType(job.Type) && job.ProfileMessageID > sm.latestProfileJobID {
+		sm.latestProfileJobID = job.ProfileMessageID
+		updatedLatestProfileID = true
+	}
+
 	select {
 	case sm.profileQueue <- job:
 		return true
@@ -190,12 +204,19 @@ func (sm *StateMachine) Enqueue(job ProfileJob) bool {
 		if shouldDeduplicate {
 			sm.recoveryQueued[job.Type] = false
 		}
+		if updatedLatestProfileID {
+			sm.latestProfileJobID = previousLatestProfileID
+		}
 		return false // queue is full
 	}
 }
 
 func isRecoveryJobType(jobType string) bool {
 	return jobType == "menu_recovery" || jobType == "stuck_recovery"
+}
+
+func isProfileJobType(jobType string) bool {
+	return jobType == "message" || jobType == "album"
 }
 
 func (sm *StateMachine) OnJobDequeued(jobType string) {
@@ -224,6 +245,8 @@ func (sm *StateMachine) BeginShutdown() {
 	sm.ownProfileSkip = ownProfileSkipContext{}
 	sm.groupedCaptions = make(map[int64]groupedCaptionContext)
 	sm.startupOwnProfileSkip = startupOwnProfileSkipContext{}
+	sm.latestProfileJobID = 0
+	sm.lastProcessedJobID = 0
 }
 
 // GetQueue returns the receive-only channel for the profile queue
@@ -442,6 +465,34 @@ func (sm *StateMachine) ClearStartupOwnProfileSkip() {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.startupOwnProfileSkip = startupOwnProfileSkipContext{}
+}
+
+// TryMarkProfileJobProcessing returns false if a profile job is stale or duplicate.
+// It accepts only the latest enqueued profile job ID and strictly monotonic progression.
+func (sm *StateMachine) TryMarkProfileJobProcessing(profileMessageID int32) (accepted bool, latest int32, lastProcessed int32) {
+	if profileMessageID <= 0 {
+		sm.mu.RLock()
+		latest = sm.latestProfileJobID
+		lastProcessed = sm.lastProcessedJobID
+		sm.mu.RUnlock()
+		return true, latest, lastProcessed
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	latest = sm.latestProfileJobID
+	lastProcessed = sm.lastProcessedJobID
+
+	if latest > 0 && profileMessageID < latest {
+		return false, latest, lastProcessed
+	}
+	if lastProcessed > 0 && profileMessageID <= lastProcessed {
+		return false, latest, lastProcessed
+	}
+
+	sm.lastProcessedJobID = profileMessageID
+	return true, latest, sm.lastProcessedJobID
 }
 
 func (sm *StateMachine) ConsumeOwnProfileSkip(candidateMessageID int32, now time.Time) bool {

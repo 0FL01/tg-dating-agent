@@ -176,7 +176,7 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 			}
 			return nil
 		}
-		if !h.state.Enqueue(ProfileJob{Type: "message", Message: m}) {
+		if !h.state.Enqueue(ProfileJob{Type: "message", Message: m, ProfileMessageID: m.ID}) {
 			log.Printf("[%s] Queue full, skipping profile", h.Name())
 		}
 		return nil
@@ -802,7 +802,7 @@ func (h *Handler) HandleAlbum(a *telegram.Album) error {
 	}
 
 	// Add to queue instead of direct processing
-	if !h.state.Enqueue(ProfileJob{Type: "album", Album: a}) {
+	if !h.state.Enqueue(ProfileJob{Type: "album", Album: a, ProfileMessageID: maxAlbumMessageID(a)}) {
 		log.Printf("[%s] Queue full, skipping album", h.Name())
 	}
 	return nil
@@ -846,9 +846,19 @@ func (h *Handler) processJob(ctx context.Context, job ProfileJob) error {
 		if job.Message == nil {
 			return nil
 		}
+		if accepted, latest, last := h.state.TryMarkProfileJobProcessing(job.ProfileMessageID); !accepted {
+			log.Printf("[%s] Skipping stale/duplicate message job (id=%d latest=%d last=%d)",
+				h.Name(), job.ProfileMessageID, latest, last)
+			return nil
+		}
 		return h.processProfile(ctx, job.Message)
 	case "album":
 		if job.Album == nil {
+			return nil
+		}
+		if accepted, latest, last := h.state.TryMarkProfileJobProcessing(job.ProfileMessageID); !accepted {
+			log.Printf("[%s] Skipping stale/duplicate album job (id=%d latest=%d last=%d)",
+				h.Name(), job.ProfileMessageID, latest, last)
 			return nil
 		}
 		return h.handleAlbumJob(ctx, job.Album)
@@ -1087,6 +1097,24 @@ func firstAlbumMessageID(a *telegram.Album) int32 {
 	}
 
 	return first
+}
+
+func maxAlbumMessageID(a *telegram.Album) int32 {
+	if a == nil {
+		return 0
+	}
+
+	var maxID int32
+	for _, msg := range a.Messages {
+		if msg == nil || msg.ID <= 0 {
+			continue
+		}
+		if msg.ID > maxID {
+			maxID = msg.ID
+		}
+	}
+
+	return maxID
 }
 
 func firstAlbumGroupedID(a *telegram.Album) int64 {
