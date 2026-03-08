@@ -78,13 +78,13 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 		return nil
 	}
 
-	if text == PatternDailyLimitExact {
+	if isDailyLimitMessage(text) {
 		pausedUntil := h.state.PauseFor(DailyLimitPauseDuration)
 		h.state.ClearPendingMessage()
 		h.state.ClearProfileData()
 		h.state.ResetRetry()
 		h.state.SetState(StateIdle)
-		log.Printf("[%s] Daily limit exact message received, pausing until %s", h.Name(), pausedUntil.Format(time.RFC3339))
+		log.Printf("[%s] Daily limit message received, pausing until %s", h.Name(), pausedUntil.Format(time.RFC3339))
 		return nil
 	}
 
@@ -153,6 +153,28 @@ func isKnownTextOnlyInterstitial(text string) bool {
 	return strings.Contains(normalized, PatternInterstitialSubscribeChannel) ||
 		strings.Contains(normalized, PatternInterstitialInternetSafety) ||
 		strings.Contains(normalized, PatternInterstitialTikTokPromo)
+}
+
+func isDailyLimitMessage(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	if normalized == "" {
+		return false
+	}
+
+	if strings.TrimSpace(text) == PatternDailyLimitExact {
+		return true
+	}
+
+	if !strings.Contains(normalized, PatternTooManyLikes) {
+		return false
+	}
+
+	hasHeart := strings.Contains(text, "❤️") || strings.Contains(text, "❤")
+	if !hasHeart {
+		return false
+	}
+
+	return strings.Contains(normalized, "today") || strings.Contains(normalized, "invite")
 }
 
 func (h *Handler) processProfile(m *telegram.NewMessage) error {

@@ -2,6 +2,7 @@ package dating
 
 import (
 	"testing"
+	"time"
 
 	"github.com/amarnathcjd/gogram/telegram"
 )
@@ -193,5 +194,127 @@ func TestShouldRecoverFromStuck(t *testing.T) {
 				t.Fatalf("shouldRecoverFromStuck() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestIsDailyLimitMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{
+			name: "exact message",
+			text: PatternDailyLimitExact,
+			want: true,
+		},
+		{
+			name: "case insensitive variation with emoji",
+			text: "TOO MANY ❤️ TODAY. Invite your friends to get more hearts.",
+			want: true,
+		},
+		{
+			name: "minor wording changes keep signal",
+			text: "Oops, too many ❤ for today. Invite friends and come back later.",
+			want: true,
+		},
+		{
+			name: "too many with today but no heart",
+			text: "Too many likes today, try again tomorrow",
+			want: false,
+		},
+		{
+			name: "too many with heart but unrelated",
+			text: "Too many thoughts ❤ about this profile",
+			want: false,
+		},
+		{
+			name: "empty text",
+			text: "",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isDailyLimitMessage(tt.text); got != tt.want {
+				t.Fatalf("isDailyLimitMessage(%q) = %v, want %v", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleDailyLimitPausesAndResetsState(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+	h.state.SetPendingMessage("draft")
+	h.state.SetProfileData(&ProfileData{ProfileText: "bio", PhotoPaths: []string{"/tmp/photo.jpg"}})
+	h.state.IncrementRetry()
+
+	msg := &telegram.NewMessage{Message: &telegram.MessageObj{Message: PatternDailyLimitExact}}
+
+	if err := h.Handle(msg); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+
+	if got := h.state.GetState(); got != StateIdle {
+		t.Fatalf("state = %v, want %v", got, StateIdle)
+	}
+
+	if got := h.state.GetPendingMessage(); got != "" {
+		t.Fatalf("pending message = %q, want empty", got)
+	}
+
+	if got := h.state.GetProfileData(); got != nil {
+		t.Fatalf("profile data = %#v, want nil", got)
+	}
+
+	if got := h.state.GetRetryCount(); got != 0 {
+		t.Fatalf("retry count = %d, want 0", got)
+	}
+
+	paused, resumed, until := h.state.CheckPause(time.Now())
+	if !paused || resumed || until.IsZero() {
+		t.Fatalf("CheckPause(now) = (%v, %v, %v), want (true, false, non-zero)", paused, resumed, until)
+	}
+
+	remaining := until.Sub(time.Now())
+	if remaining > DailyLimitPauseDuration || remaining < DailyLimitPauseDuration-2*time.Second {
+		t.Fatalf("pause remaining = %v, want close to %v", remaining, DailyLimitPauseDuration)
+	}
+}
+
+func TestHandleGenericTooManyStopsWithoutPause(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+	h.state.SetPendingMessage("draft")
+	h.state.SetProfileData(&ProfileData{ProfileText: "bio", PhotoPaths: []string{"/tmp/photo.jpg"}})
+	h.state.IncrementRetry()
+
+	msg := &telegram.NewMessage{Message: &telegram.MessageObj{Message: "Too many likes today, try again tomorrow"}}
+
+	if err := h.Handle(msg); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+
+	if got := h.state.GetState(); got != StateStopped {
+		t.Fatalf("state = %v, want %v", got, StateStopped)
+	}
+
+	if got := h.state.GetPendingMessage(); got != "" {
+		t.Fatalf("pending message = %q, want empty", got)
+	}
+
+	if got := h.state.GetProfileData(); got != nil {
+		t.Fatalf("profile data = %#v, want nil", got)
+	}
+
+	if got := h.state.GetRetryCount(); got != 0 {
+		t.Fatalf("retry count = %d, want 0", got)
+	}
+
+	paused, resumed, until := h.state.CheckPause(time.Now())
+	if paused || resumed || !until.IsZero() {
+		t.Fatalf("CheckPause(now) = (%v, %v, %v), want (false, false, zero)", paused, resumed, until)
 	}
 }
