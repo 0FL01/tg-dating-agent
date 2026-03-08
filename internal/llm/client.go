@@ -27,6 +27,7 @@ var mimeTypes = map[string]string{
 type Client struct {
 	client               *openrouter.Client
 	createChatCompletion func(context.Context, openrouter.ChatCompletionRequest) (openrouter.ChatCompletionResponse, error)
+	onMediaPartStart     func()
 }
 
 var _ MultimodalSummarizer = (*Client)(nil)
@@ -40,7 +41,7 @@ func NewClient(apiKey string) *Client {
 }
 
 func (c *Client) SummarizeMultimodal(ctx context.Context, model, systemPrompt string, content MultimodalContent, temperature float64) (string, error) {
-	parts, err := c.buildMultimodalParts(content, systemPrompt)
+	parts, err := c.buildMultimodalParts(ctx, content, systemPrompt)
 	if err != nil {
 		return "", err
 	}
@@ -102,11 +103,19 @@ func (c *Client) wrapRetryableError(err error) error {
 	return err
 }
 
-func fileToBase64DataURL(filePath string) (string, error) {
+func fileToBase64DataURL(ctx context.Context, filePath string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return "", err
 	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	ext := strings.ToLower(filepath.Ext(filePath))
 	mime, ok := mimeTypes[ext]
 	if !ok {
@@ -115,7 +124,11 @@ func fileToBase64DataURL(filePath string) (string, error) {
 	return fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(data)), nil
 }
 
-func (c *Client) buildMultimodalParts(content MultimodalContent, systemPrompt string) ([]openrouter.ChatMessagePart, error) {
+func (c *Client) buildMultimodalParts(ctx context.Context, content MultimodalContent, systemPrompt string) ([]openrouter.ChatMessagePart, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	var parts []openrouter.ChatMessagePart
 
 	if content.Text != "" {
@@ -126,7 +139,14 @@ func (c *Client) buildMultimodalParts(content MultimodalContent, systemPrompt st
 	}
 
 	for _, imgPath := range content.ImagePaths {
-		dataURL, err := fileToBase64DataURL(imgPath)
+		if c.onMediaPartStart != nil {
+			c.onMediaPartStart()
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		dataURL, err := fileToBase64DataURL(ctx, imgPath)
 		if err != nil {
 			return nil, fmt.Errorf("image encoding failed: %w", err)
 		}
@@ -137,10 +157,21 @@ func (c *Client) buildMultimodalParts(content MultimodalContent, systemPrompt st
 	}
 
 	if content.AudioPath != "" {
+		if c.onMediaPartStart != nil {
+			c.onMediaPartStart()
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		audioData, err := os.ReadFile(content.AudioPath)
 		if err != nil {
 			return nil, fmt.Errorf("audio read failed: %w", err)
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		parts = append(parts, openrouter.ChatMessagePart{
 			Type: openrouter.ChatMessagePartTypeInputAudio,
 			InputAudio: &openrouter.ChatMessageInputAudio{
