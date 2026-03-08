@@ -3,6 +3,8 @@ package dating
 import (
 	"sync"
 	"time"
+
+	"github.com/amarnathcjd/gogram/telegram"
 )
 
 type State int
@@ -34,19 +36,30 @@ type ProfileData struct {
 	ProfileText string
 }
 
+// ProfileJob represents a job to process a profile from the queue
+type ProfileJob struct {
+	Type    string               // "message" or "album"
+	Message *telegram.NewMessage // nil for album jobs
+	Album   *telegram.Album      // nil for message jobs
+}
+
 type StateMachine struct {
 	mu             sync.RWMutex
 	state          State
 	pendingMessage string
-	processing     bool
 	retryCount     int
 	profileData    *ProfileData
 	pausedUntil    time.Time
+	// New fields for worker pool pattern:
+	profileQueue chan ProfileJob // buffered channel for profile queue
+	quitChan     chan struct{}   // for graceful shutdown
 }
 
 func NewStateMachine() *StateMachine {
 	return &StateMachine{
-		state: StateIdle,
+		state:        StateIdle,
+		profileQueue: make(chan ProfileJob, 50), // buffer for 50 profiles
+		quitChan:     make(chan struct{}),
 	}
 }
 
@@ -84,26 +97,30 @@ func (sm *StateMachine) IsStopped() bool {
 	return sm.GetState() == StateStopped
 }
 
-func (sm *StateMachine) TryStartProcessing() bool {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	if sm.processing {
-		return false
+// Enqueue adds a job to the profile queue.
+// Returns true if job was added, false if queue is full.
+func (sm *StateMachine) Enqueue(job ProfileJob) bool {
+	select {
+	case sm.profileQueue <- job:
+		return true
+	default:
+		return false // queue is full
 	}
-	sm.processing = true
-	return true
 }
 
-func (sm *StateMachine) StopProcessing() {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	sm.processing = false
+// GetQueue returns the receive-only channel for the profile queue
+func (sm *StateMachine) GetQueue() <-chan ProfileJob {
+	return sm.profileQueue
 }
 
-func (sm *StateMachine) IsProcessing() bool {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	return sm.processing
+// StopWorker signals the worker goroutine to stop
+func (sm *StateMachine) StopWorker() {
+	close(sm.quitChan)
+}
+
+// ShouldQuit returns the channel that signals worker to stop
+func (sm *StateMachine) ShouldQuit() <-chan struct{} {
+	return sm.quitChan
 }
 
 func (sm *StateMachine) IncrementRetry() int {

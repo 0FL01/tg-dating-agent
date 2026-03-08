@@ -6,6 +6,7 @@
 - Language: Go 1.25
 - Frameworks: gogram (Telegram client)
 - Key Libs: go-openrouter (LLM API client)
+- Patterns: Worker Pool (profile queue), State Machine, Retry with exponential backoff
 
 ## Branch
 The default branch is `main`.
@@ -18,8 +19,8 @@ The default branch is `main`.
 │       └── main.go              # Entry point: setup, auth, event handlers
 ├── internal/
 │   ├── dating/
-│   │   ├── dating.go            # Core logic: profile processing, message generation, retry flow
-│   │   ├── state.go             # State machine for conversation flow with pause/resume
+│   │   ├── dating.go            # Core logic: worker pool, profile processing, message generation, retry flow
+│   │   ├── state.go             # State machine with profile queue (buffer 50), worker goroutine, graceful shutdown
 │   │   ├── messages.go          # Constants: button texts, patterns, retry prompts
 │   │   ├── markup.go            # Reply markup helpers for button detection
 │   │   ├── bootstrap.go         # Standalone handler wiring for external entrypoints
@@ -44,7 +45,7 @@ The default branch is `main`.
 └── env.example                  # Environment variables template
 
 ### Key Modules
-- **dating**: Profile processing, MBTI filtering, message generation workflow, retry logic, button detection
+- **dating**: Profile queue (buffer 50), worker goroutine, MBTI filtering, message generation workflow, retry logic, button detection
 - **llm**: OpenRouter integration with image+text multimodal support
 - **standalone**: Configuration, authentication, and bootstrap wiring
 - **tghelper**: Resilient Telegram API operations with retry logic, exponential backoff, jitter
@@ -52,6 +53,7 @@ The default branch is `main`.
 ## 🛠 Architecture & Rules
 
 ### 1. Patterns
+- **Worker Pool Pattern**: Profile queue (chan ProfileJob, buffer 50) with dedicated worker goroutine for sequential processing; handlers enqueue jobs; graceful shutdown via quitChan
 - **State Machine**: `StateMachine` tracks conversation state (idle, viewing, paused, stopped)
 - **Retry Pattern**: All external calls use `tghelper.RetryTelegram` with exponential backoff and jitter; message retry handles too long/too short scenarios
 - **Multimodal LLM**: Profiles processed with photos + text for MBTI analysis and message generation
@@ -66,10 +68,11 @@ The default branch is `main`.
 - **Security**: Non-root Docker user, read-only root filesystem, tmpfs for /tmp
 
 ### 3. State Management
-States: `idle` → `viewing_profiles` → `waiting_prompt` → (loop)
+States: `idle` → `enqueue` (add to queue) → `viewing_profiles` → `waiting_prompt` → (loop)
 - Paused for 24h on daily limit
 - Stopped on match or `*stop`/`💤` command
-- Concurrent processing prevented via `TryStartProcessing()`
+- Sequential processing via worker goroutine with buffered profile queue (50 jobs)
+- Graceful shutdown: worker goroutine terminated via quitChan; queue drained on stop
 
 ### 4. LLM Integration Flow
 1. Download profile photo(s) (single photo or album)

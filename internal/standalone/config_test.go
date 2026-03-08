@@ -243,6 +243,33 @@ func TestLoadDatingMBTIAllowlistFallbackOnEmpty(t *testing.T) {
 	}
 }
 
+func TestLoadDatingJitterDelayDefault(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.DatingJitterDelay != DefaultDatingJitterMax {
+		t.Errorf("DatingJitterDelay = %v, want %v", cfg.DatingJitterDelay, DefaultDatingJitterMax)
+	}
+}
+
+func TestLoadDatingJitterDelayCustom(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("DATING_JITTER_DELAY", "3s")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.DatingJitterDelay != 3*time.Second {
+		t.Errorf("DatingJitterDelay = %v, want 3s", cfg.DatingJitterDelay)
+	}
+}
+
 func TestLoadOpenRouterModelDefault(t *testing.T) {
 	setRequiredEnv(t)
 

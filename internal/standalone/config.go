@@ -32,6 +32,7 @@ type Config struct {
 	DatingMBTIPrompt     string
 	DatingMBTIAllowlist  []string
 	DatingActionDelay    time.Duration
+	DatingJitterDelay    time.Duration
 	DatingTemperature    float64
 	DatingSkipLowQuality bool
 	DatingMinBioLength   int
@@ -42,7 +43,8 @@ const (
 	DefaultDatingBotChatID    int64 = 1234060895
 	DefaultDatingBotUsername        = "leomatchbot"
 	DefaultDatingModel              = "google/gemini-2.5-flash-lite-preview-06-2025"
-	DefaultDatingActionDelay        = 3 * time.Second
+	DefaultDatingActionDelay        = 15 * time.Second
+	DefaultDatingJitterMax          = 5 * time.Second
 	DefaultDatingTemperature        = 0.7
 	DefaultDatingMinBioLength       = 50
 	DefaultOpenRouterModel          = "google/gemini-2.5-flash"
@@ -161,6 +163,14 @@ func Load() (*Config, error) {
 		}
 	}
 
+	// Dating: Jitter Delay
+	datingJitterDelay := DefaultDatingJitterMax
+	if v := os.Getenv("DATING_JITTER_DELAY"); v != "" {
+		if parsed, err := time.ParseDuration(v); err == nil {
+			datingJitterDelay = parsed
+		}
+	}
+
 	// Dating: Temperature
 	datingTemperature := DefaultDatingTemperature
 	if v := os.Getenv("DATING_TEMPERATURE"); v != "" {
@@ -194,6 +204,7 @@ func Load() (*Config, error) {
 		DatingMBTIPrompt:     datingMBTIPrompt,
 		DatingMBTIAllowlist:  datingMBTIAllowlist,
 		DatingActionDelay:    datingActionDelay,
+		DatingJitterDelay:    datingJitterDelay,
 		DatingTemperature:    datingTemperature,
 		DatingSkipLowQuality: datingSkipLowQuality,
 		DatingMinBioLength:   datingMinBioLength,

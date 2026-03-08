@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"strings"
 	"sync"
@@ -19,6 +20,9 @@ import (
 
 const DailyLimitPauseDuration = 24 * time.Hour
 
+// jitterRand is a thread-safe local random generator for jitter calculations
+var jitterRand = rand.New(rand.NewSource(time.Now().UnixNano()))
+
 // Handler handles the dating bot automation
 type Handler struct {
 	config      *standalone.Config
@@ -30,6 +34,7 @@ type Handler struct {
 	model       string
 	prompt      string
 	actionDelay time.Duration
+	jitterDelay time.Duration
 	temperature float64
 	botPeerMu   sync.RWMutex
 	botPeer     telegram.InputPeer
@@ -47,6 +52,7 @@ func NewHandler(cfg *standalone.Config, client llm.MultimodalSummarizer, tgClien
 		model:       cfg.DatingModel,
 		prompt:      cfg.DatingPrompt,
 		actionDelay: cfg.DatingActionDelay,
+		jitterDelay: cfg.DatingJitterDelay,
 		temperature: cfg.DatingTemperature,
 	}
 }
@@ -54,6 +60,16 @@ func NewHandler(cfg *standalone.Config, client llm.MultimodalSummarizer, tgClien
 // Name returns the handler name for logging
 func (h *Handler) Name() string {
 	return "dating"
+}
+
+// getProcessingDelay returns delay with jitter for rate limiting
+// Minimum actionDelay + random 0 to jitterDelay (default: 15s + 0-5s = 15-20s)
+func (h *Handler) getProcessingDelay() time.Duration {
+	if h.jitterDelay <= 0 {
+		return h.actionDelay
+	}
+	jitter := time.Duration(jitterRand.Int63n(int64(h.jitterDelay)))
+	return h.actionDelay + jitter
 }
 
 // Filter returns a filter function for incoming messages from dating bot
@@ -112,17 +128,26 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 	}
 
 	if strings.Contains(text, PatternViewProfiles) {
-		log.Printf("[%s] Detected main menu, starting profile viewing", h.Name())
-		return h.clickButton(ButtonViewProfiles)
+		log.Printf("[%s] Detected main menu, enqueuing profile viewing", h.Name())
+		if !h.state.Enqueue(ProfileJob{Type: "menu_recovery", Message: m}) {
+			log.Printf("[%s] Queue full, skipping main menu recovery", h.Name())
+		}
+		return nil
 	}
 
 	if m.Photo() != nil || m.IsMedia() {
-		return h.processProfile(m)
+		if !h.state.Enqueue(ProfileJob{Type: "message", Message: m}) {
+			log.Printf("[%s] Queue full, skipping profile", h.Name())
+		}
+		return nil
 	}
 
 	if h.shouldRecoverFromStuck(m) {
 		log.Printf("[%s] Recovering viewing flow from interstitial message", h.Name())
-		return h.clickButton(ButtonViewProfiles)
+		if !h.state.Enqueue(ProfileJob{Type: "stuck_recovery", Message: m}) {
+			log.Printf("[%s] Queue full, skipping recovery", h.Name())
+		}
+		return nil
 	}
 
 	return nil
@@ -175,12 +200,6 @@ func isDailyLimitMessage(text string) bool {
 }
 
 func (h *Handler) processProfile(m *telegram.NewMessage) error {
-	if !h.state.TryStartProcessing() {
-		log.Printf("[%s] Already processing, skipping profile", h.Name())
-		return nil
-	}
-	defer h.state.StopProcessing()
-
 	if h.isLowQuality(m.Text()) {
 		log.Printf("[%s] Skipping low quality profile (len=%d): %s...",
 			h.Name(), utf8.RuneCountInString(m.Text()), utils.Truncate(m.Text(), 20))
@@ -520,9 +539,10 @@ func truncateMessage(msg string, maxLen int) string {
 }
 
 func (h *Handler) clickButton(buttonText string) error {
-	log.Printf("[%s] Clicking button: %s (delay: %v)", h.Name(), buttonText, h.actionDelay)
+	log.Printf("[%s] Clicking button: %s", h.Name(), buttonText)
 
-	time.Sleep(h.actionDelay)
+	// Note: Rate limiting is now handled in worker loop via getProcessingDelay()
+	// This method no longer includes time.Sleep to avoid double delays
 
 	ctx := context.Background()
 	peer, err := h.ensureBotPeer(ctx)
@@ -617,11 +637,16 @@ func (h *Handler) HandleAlbum(a *telegram.Album) error {
 		return nil
 	}
 
-	if !h.state.TryStartProcessing() {
-		log.Printf("[%s] Already processing, skipping album", h.Name())
-		return nil
+	// Add to queue instead of direct processing
+	if !h.state.Enqueue(ProfileJob{Type: "album", Album: a}) {
+		log.Printf("[%s] Queue full, skipping album", h.Name())
 	}
-	defer h.state.StopProcessing()
+	return nil
+}
+
+// handleAlbumJob performs actual album processing (inside worker)
+func (h *Handler) handleAlbumJob(a *telegram.Album) error {
+	h.cacheBotPeerFromAlbum(a)
 
 	var profileText string
 	for _, msg := range a.Messages {
@@ -647,6 +672,61 @@ func (h *Handler) HandleAlbum(a *telegram.Album) error {
 	log.Printf("[%s] Album: %d photos, text: %s", h.Name(), len(data.PhotoPaths), utils.Truncate(data.ProfileText, 100))
 
 	return h.generateAndSendLike(ctx, data)
+}
+
+// processJob processes jobs from the queue sequentially
+func (h *Handler) processJob(job ProfileJob) error {
+	switch job.Type {
+	case "message":
+		if job.Message == nil {
+			return nil
+		}
+		return h.processProfile(job.Message)
+	case "album":
+		if job.Album == nil {
+			return nil
+		}
+		return h.handleAlbumJob(job.Album)
+	case "menu_recovery":
+		log.Printf("[%s] Processing menu recovery job", h.Name())
+		return h.clickButton(ButtonViewProfiles)
+	case "stuck_recovery":
+		log.Printf("[%s] Processing stuck recovery job", h.Name())
+		return h.clickButton(ButtonViewProfiles)
+	default:
+		log.Printf("[%s] Unknown job type: %s", h.Name(), job.Type)
+		return nil
+	}
+}
+
+// StartWorker starts a goroutine to process the profile queue
+func (h *Handler) StartWorker() {
+	go func() {
+		log.Printf("[%s] Worker started", h.Name())
+		defer log.Printf("[%s] Worker stopped", h.Name())
+
+		for {
+			select {
+			case job := <-h.state.GetQueue():
+				// Rate limiting: wait before processing each profile
+				delay := h.getProcessingDelay()
+				log.Printf("[%s] Rate limiting: waiting %v before processing", h.Name(), delay)
+				time.Sleep(delay)
+
+				log.Printf("[%s] Processing job type: %s", h.Name(), job.Type)
+				if err := h.processJob(job); err != nil {
+					log.Printf("[%s] Job processing error: %v", h.Name(), err)
+				}
+			case <-h.state.ShouldQuit():
+				return
+			}
+		}
+	}()
+}
+
+// StopWorker stops the worker goroutine
+func (h *Handler) StopWorker() {
+	h.state.StopWorker()
 }
 
 func (h *Handler) cacheBotPeerFromAlbum(a *telegram.Album) {

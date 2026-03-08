@@ -35,6 +35,7 @@ func main() {
 
 	handler := dating.NewStandaloneHandler(cfg, result.Client)
 	handler.Start()
+	handler.StartWorker()
 
 	result.Client.On("message", func(m *telegram.NewMessage) error {
 		if !handler.Filter()(m) {
@@ -65,12 +66,13 @@ func main() {
 
 	log.Printf("Dating Agent ready! Listening for profiles from chat ID: %d", cfg.DatingBotChatID)
 
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
 	go func() {
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		log.Println("Received shutdown signal, stopping...")
-		os.Exit(0)
+		log.Println("Received shutdown signal, stopping worker...")
+		handler.StopWorker()
 	}()
 
 	result.Client.Idle()
