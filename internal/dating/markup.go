@@ -2,6 +2,14 @@ package dating
 
 import "github.com/amarnathcjd/gogram/telegram"
 
+func hasReplyMarkup(m *telegram.NewMessage) bool {
+	if m == nil || m.Message == nil {
+		return false
+	}
+
+	return m.Message.ReplyMarkup != nil
+}
+
 func hasReplyKeyboardButtonText(m *telegram.NewMessage, buttonText string) bool {
 	if m == nil || m.Message == nil || buttonText == "" {
 		return false

@@ -121,7 +121,7 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 	}
 
 	if h.shouldRecoverFromStuck(m) {
-		log.Printf("[%s] Recovering viewing flow from text-only message via reply keyboard", h.Name())
+		log.Printf("[%s] Recovering viewing flow from interstitial message", h.Name())
 		return h.clickButton(ButtonViewProfiles)
 	}
 
@@ -129,7 +129,30 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 }
 
 func (h *Handler) shouldRecoverFromStuck(m *telegram.NewMessage) bool {
-	return h.state.GetState() == StateViewingProfiles && hasReplyKeyboardButtonText(m, ButtonViewProfiles)
+	if h.state.GetState() != StateViewingProfiles || m == nil {
+		return false
+	}
+
+	if hasReplyKeyboardButtonText(m, ButtonViewProfiles) {
+		return true
+	}
+
+	if hasReplyMarkup(m) {
+		return false
+	}
+
+	return isKnownTextOnlyInterstitial(m.Text())
+}
+
+func isKnownTextOnlyInterstitial(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	if normalized == "" {
+		return false
+	}
+
+	return strings.Contains(normalized, PatternInterstitialSubscribeChannel) ||
+		strings.Contains(normalized, PatternInterstitialInternetSafety) ||
+		strings.Contains(normalized, PatternInterstitialTikTokPromo)
 }
 
 func (h *Handler) processProfile(m *telegram.NewMessage) error {
