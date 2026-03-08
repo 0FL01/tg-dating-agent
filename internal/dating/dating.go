@@ -156,6 +156,10 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 	}
 
 	if m.Photo() != nil || m.IsMedia() {
+		if m.Message != nil && m.Message.GroupedID != 0 {
+			return nil
+		}
+
 		// Check if this is our own profile that should be skipped
 		if h.shouldSkipOwnProfileByMessageID(m.ID) {
 			log.Printf("[%s] Skipping own profile photo", h.Name())

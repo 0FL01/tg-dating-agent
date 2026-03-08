@@ -263,6 +263,40 @@ func TestHandleAlbumOwnProfileSkipUsesSameCorrelationRule(t *testing.T) {
 	}
 }
 
+func TestHandleGroupedMediaSkipsMessageEnqueue(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+
+	msg := &telegram.NewMessage{ID: 401, Message: &telegram.MessageObj{
+		Media:     &telegram.MessageMediaPhoto{},
+		GroupedID: 777,
+		PeerID:    &telegram.PeerUser{UserID: h.chatID},
+	}}
+
+	if err := h.Handle(msg); err != nil {
+		t.Fatalf("Handle(grouped media) error = %v", err)
+	}
+
+	mustQueueEmpty(t, h.state)
+}
+
+func TestHandleNonGroupedMediaStillEnqueuesMessageJob(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+
+	msg := &telegram.NewMessage{ID: 402, Message: &telegram.MessageObj{
+		Media:  &telegram.MessageMediaPhoto{},
+		PeerID: &telegram.PeerUser{UserID: h.chatID},
+	}}
+
+	if err := h.Handle(msg); err != nil {
+		t.Fatalf("Handle(non-grouped media) error = %v", err)
+	}
+
+	job := mustDequeueJob(t, h.state)
+	if job.Type != "message" || job.Message == nil || job.Message.ID != 402 {
+		t.Fatalf("queued job = %+v, want message job id 402", job)
+	}
+}
+
 func TestBootstrapWithActionsSequencingWhileHandlersMutateOwnProfileState(t *testing.T) {
 	h := &Handler{chatID: 123456789, state: NewStateMachine()}
 
@@ -538,6 +572,16 @@ func mustDequeueJob(t *testing.T, sm *StateMachine) ProfileJob {
 	}
 
 	return ProfileJob{}
+}
+
+func mustQueueEmpty(t *testing.T, sm *StateMachine) {
+	t.Helper()
+
+	select {
+	case job := <-sm.GetQueue():
+		t.Fatalf("expected empty queue, got job %+v", job)
+	default:
+	}
 }
 
 func mustReceiveSignal(t *testing.T, ch <-chan struct{}, waitFor string) {
