@@ -138,14 +138,14 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 	// Detect "Your profile" message - next photo will be own profile, skip it
 	lowerText := strings.ToLower(text)
 	if strings.Contains(lowerText, PatternYourProfile) || strings.Contains(lowerText, PatternYourProfileRU) {
-		log.Printf("[%s] Detected 'Your profile' message, will skip next profile photo", h.Name())
-		h.state.SetSkipNextProfile(true)
+		log.Printf("[%s] Detected 'Your profile' marker (msg_id=%d), arming skip context", h.Name(), m.ID)
+		h.state.MarkOwnProfileSkip(m.ID, time.Now())
 		return nil
 	}
 
 	if m.Photo() != nil || m.IsMedia() {
 		// Check if this is our own profile that should be skipped
-		if h.state.ConsumeSkipNextProfile() {
+		if h.shouldSkipOwnProfileByMessageID(m.ID) {
 			log.Printf("[%s] Skipping own profile photo", h.Name())
 			// Continue to actual profiles by clicking "View profiles"
 			if !h.state.Enqueue(ProfileJob{Type: "menu_recovery", Message: m}) {
@@ -655,7 +655,7 @@ func (h *Handler) HandleAlbum(a *telegram.Album) error {
 	}
 
 	// Check if this is our own profile that should be skipped
-	if h.state.ConsumeSkipNextProfile() {
+	if h.shouldSkipOwnProfileByMessageID(firstAlbumMessageID(a)) {
 		log.Printf("[%s] Skipping own profile album", h.Name())
 		// Continue to actual profiles by clicking "View profiles"
 		if !h.state.Enqueue(ProfileJob{Type: "menu_recovery", Message: nil}) {
@@ -778,6 +778,28 @@ func (h *Handler) isPaused() bool {
 	}
 
 	return false
+}
+
+func (h *Handler) shouldSkipOwnProfileByMessageID(messageID int32) bool {
+	return h.state.ConsumeOwnProfileSkip(messageID, time.Now())
+}
+
+func firstAlbumMessageID(a *telegram.Album) int32 {
+	if a == nil {
+		return 0
+	}
+
+	var first int32
+	for _, msg := range a.Messages {
+		if msg == nil || msg.ID <= 0 {
+			continue
+		}
+		if first == 0 || msg.ID < first {
+			first = msg.ID
+		}
+	}
+
+	return first
 }
 
 func (h *Handler) ensureBotPeer(ctx context.Context) (telegram.InputPeer, error) {

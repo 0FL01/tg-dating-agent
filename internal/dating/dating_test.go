@@ -157,6 +157,94 @@ func TestHandleAlbumCachesBotPeerBeforeEarlyReturn(t *testing.T) {
 	}
 }
 
+func TestHandleOwnProfileSkipKeepsContextAcrossWrongFirstMedia(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+
+	marker := &telegram.NewMessage{ID: 100, Message: &telegram.MessageObj{
+		Message: "Your profile",
+		PeerID:  &telegram.PeerUser{UserID: h.chatID},
+	}}
+	if err := h.Handle(marker); err != nil {
+		t.Fatalf("Handle(marker) error = %v", err)
+	}
+
+	wrongFirstMedia := &telegram.NewMessage{ID: 110, Message: &telegram.MessageObj{
+		Media:  &telegram.MessageMediaPhoto{},
+		PeerID: &telegram.PeerUser{UserID: h.chatID},
+	}}
+	if err := h.Handle(wrongFirstMedia); err != nil {
+		t.Fatalf("Handle(wrongFirstMedia) error = %v", err)
+	}
+
+	ownProfileMedia := &telegram.NewMessage{ID: 101, Message: &telegram.MessageObj{
+		Media:  &telegram.MessageMediaPhoto{},
+		PeerID: &telegram.PeerUser{UserID: h.chatID},
+	}}
+	if err := h.Handle(ownProfileMedia); err != nil {
+		t.Fatalf("Handle(ownProfileMedia) error = %v", err)
+	}
+
+	job1 := mustDequeueJob(t, h.state)
+	if job1.Type != "message" || job1.Message == nil || job1.Message.ID != 110 {
+		t.Fatalf("first queued job = %+v, want media message id 110", job1)
+	}
+
+	job2 := mustDequeueJob(t, h.state)
+	if job2.Type != "menu_recovery" {
+		t.Fatalf("second queued job type = %q, want %q", job2.Type, "menu_recovery")
+	}
+}
+
+func TestHandleAlbumOwnProfileSkipUsesSameCorrelationRule(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.MarkOwnProfileSkip(300, time.Now())
+
+	wrongFirstAlbum := &telegram.Album{Messages: []*telegram.NewMessage{{
+		ID: 310,
+		Message: &telegram.MessageObj{
+			Media:  &telegram.MessageMediaPhoto{},
+			PeerID: &telegram.PeerUser{UserID: h.chatID},
+		},
+	}}}
+	if err := h.HandleAlbum(wrongFirstAlbum); err != nil {
+		t.Fatalf("HandleAlbum(wrongFirstAlbum) error = %v", err)
+	}
+
+	ownProfileAlbum := &telegram.Album{Messages: []*telegram.NewMessage{{
+		ID: 301,
+		Message: &telegram.MessageObj{
+			Media:  &telegram.MessageMediaPhoto{},
+			PeerID: &telegram.PeerUser{UserID: h.chatID},
+		},
+	}}}
+	if err := h.HandleAlbum(ownProfileAlbum); err != nil {
+		t.Fatalf("HandleAlbum(ownProfileAlbum) error = %v", err)
+	}
+
+	job1 := mustDequeueJob(t, h.state)
+	if job1.Type != "album" || job1.Album == nil || len(job1.Album.Messages) == 0 || job1.Album.Messages[0].ID != 310 {
+		t.Fatalf("first queued job = %+v, want album with id 310", job1)
+	}
+
+	job2 := mustDequeueJob(t, h.state)
+	if job2.Type != "menu_recovery" {
+		t.Fatalf("second queued job type = %q, want %q", job2.Type, "menu_recovery")
+	}
+}
+
+func mustDequeueJob(t *testing.T, sm *StateMachine) ProfileJob {
+	t.Helper()
+
+	select {
+	case job := <-sm.GetQueue():
+		return job
+	default:
+		t.Fatal("expected queued job, queue is empty")
+	}
+
+	return ProfileJob{}
+}
+
 func TestTruncateMessageUTF8(t *testing.T) {
 	tests := []struct {
 		name      string

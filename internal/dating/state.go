@@ -44,16 +44,25 @@ type ProfileJob struct {
 }
 
 type StateMachine struct {
-	mu              sync.RWMutex
-	state           State
-	pendingMessage  string
-	retryCount      int
-	profileData     *ProfileData
-	pausedUntil     time.Time
-	skipNextProfile bool // flag to skip own profile after "Your profile" message
+	mu             sync.RWMutex
+	state          State
+	pendingMessage string
+	retryCount     int
+	profileData    *ProfileData
+	pausedUntil    time.Time
+	ownProfileSkip ownProfileSkipContext
 	// New fields for worker pool pattern:
 	profileQueue chan ProfileJob // buffered channel for profile queue
 	quitChan     chan struct{}   // for graceful shutdown
+}
+
+const ownProfileSkipTTL = 45 * time.Second
+const ownProfileSkipMaxMessageGap int32 = 3
+
+type ownProfileSkipContext struct {
+	markerMessageID int32
+	setAt           time.Time
+	active          bool
 }
 
 func NewStateMachine() *StateMachine {
@@ -78,7 +87,7 @@ func (sm *StateMachine) SetState(state State) {
 	// Reset skip flag when stopping or going idle
 	// (profiles won't be processed in these states anyway)
 	if state == StateStopped || state == StateIdle {
-		sm.skipNextProfile = false
+		sm.ownProfileSkip = ownProfileSkipContext{}
 	}
 }
 
@@ -206,27 +215,42 @@ func (sm *StateMachine) CheckPause(now time.Time) (paused bool, resumed bool, un
 	return false, true, time.Time{}
 }
 
-// ShouldSkipNextProfile returns true if the next profile should be skipped
-// (used to skip own profile after "Your profile" message)
-func (sm *StateMachine) ShouldSkipNextProfile() bool {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	return sm.skipNextProfile
-}
+func (sm *StateMachine) MarkOwnProfileSkip(markerMessageID int32, now time.Time) {
+	if markerMessageID <= 0 {
+		return
+	}
 
-// SetSkipNextProfile sets the flag to skip the next profile
-func (sm *StateMachine) SetSkipNextProfile(skip bool) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	sm.skipNextProfile = skip
+	sm.ownProfileSkip = ownProfileSkipContext{
+		markerMessageID: markerMessageID,
+		setAt:           now,
+		active:          true,
+	}
 }
 
-// ConsumeSkipNextProfile checks if we should skip, and clears the flag
-// Returns true if the current profile should be skipped
-func (sm *StateMachine) ConsumeSkipNextProfile() bool {
+func (sm *StateMachine) ConsumeOwnProfileSkip(candidateMessageID int32, now time.Time) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	shouldSkip := sm.skipNextProfile
-	sm.skipNextProfile = false
-	return shouldSkip
+
+	if !sm.ownProfileSkip.active {
+		return false
+	}
+
+	if now.Sub(sm.ownProfileSkip.setAt) > ownProfileSkipTTL {
+		sm.ownProfileSkip = ownProfileSkipContext{}
+		return false
+	}
+
+	if candidateMessageID <= 0 {
+		return false
+	}
+
+	gap := candidateMessageID - sm.ownProfileSkip.markerMessageID
+	if gap <= 0 || gap > ownProfileSkipMaxMessageGap {
+		return false
+	}
+
+	sm.ownProfileSkip = ownProfileSkipContext{}
+	return true
 }

@@ -48,3 +48,37 @@ func TestStateMachinePauseForOverwritesExistingPause(t *testing.T) {
 		t.Fatalf("second pause deadline = %v, want after first = %v", second, first)
 	}
 }
+
+func TestStateMachineOwnProfileSkipExpiresByTTL(t *testing.T) {
+	sm := NewStateMachine()
+	now := time.Unix(1000, 0)
+
+	sm.MarkOwnProfileSkip(100, now)
+
+	if got := sm.ConsumeOwnProfileSkip(101, now.Add(ownProfileSkipTTL+time.Nanosecond)); got {
+		t.Fatal("ConsumeOwnProfileSkip() = true after TTL expiry, want false")
+	}
+
+	if got := sm.ConsumeOwnProfileSkip(101, now.Add(ownProfileSkipTTL+2*time.Nanosecond)); got {
+		t.Fatal("ConsumeOwnProfileSkip() = true after context expired and cleared, want false")
+	}
+}
+
+func TestStateMachineOwnProfileSkipInterleavingWrongFirstMedia(t *testing.T) {
+	sm := NewStateMachine()
+	now := time.Unix(2000, 0)
+
+	sm.MarkOwnProfileSkip(100, now)
+
+	if got := sm.ConsumeOwnProfileSkip(110, now.Add(time.Second)); got {
+		t.Fatal("ConsumeOwnProfileSkip() = true for non-correlated media, want false")
+	}
+
+	if got := sm.ConsumeOwnProfileSkip(101, now.Add(2*time.Second)); !got {
+		t.Fatal("ConsumeOwnProfileSkip() = false for correlated own profile media, want true")
+	}
+
+	if got := sm.ConsumeOwnProfileSkip(102, now.Add(3*time.Second)); got {
+		t.Fatal("ConsumeOwnProfileSkip() = true after successful consume, want false")
+	}
+}
