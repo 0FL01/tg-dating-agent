@@ -1,7 +1,7 @@
 package dating
 
 const (
-	StatusStopped = "💤 Dating bot остановлен"
+	StatusStopped = "zzz)"
 )
 
 const (
