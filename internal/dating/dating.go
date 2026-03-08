@@ -675,13 +675,7 @@ func (h *Handler) HandleAlbum(a *telegram.Album) error {
 func (h *Handler) handleAlbumJob(a *telegram.Album) error {
 	h.cacheBotPeerFromAlbum(a)
 
-	var profileText string
-	for _, msg := range a.Messages {
-		if text := msg.Text(); text != "" {
-			profileText = text
-			break
-		}
-	}
+	profileText := profileTextFromAlbumMessages(a.Messages)
 
 	if h.isLowQuality(profileText) {
 		log.Printf("[%s] Skipping low quality album profile (len=%d): %s...",
@@ -693,7 +687,7 @@ func (h *Handler) handleAlbumJob(a *telegram.Album) error {
 	ctx := context.Background()
 	h.state.SetState(StateViewingProfiles)
 
-	data, cleanup := h.downloadAlbumData(ctx, a)
+	data, cleanup := h.downloadAlbumData(ctx, a, profileText)
 	defer cleanup()
 
 	log.Printf("[%s] Album: %d photos, text: %s", h.Name(), len(data.PhotoPaths), utils.Truncate(data.ProfileText, 100))
@@ -802,6 +796,67 @@ func firstAlbumMessageID(a *telegram.Album) int32 {
 	return first
 }
 
+func profileTextFromAlbumMessages(messages []*telegram.NewMessage) string {
+	msg := selectAlbumTextSourceMessage(messages)
+	if msg == nil {
+		return ""
+	}
+	return msg.Text()
+}
+
+func selectAlbumTextSourceMessage(messages []*telegram.NewMessage) *telegram.NewMessage {
+	var photoTextMessage *telegram.NewMessage
+	photoTextIndex := -1
+	var fallbackTextMessage *telegram.NewMessage
+	fallbackTextIndex := -1
+
+	for i, msg := range messages {
+		if msg == nil || strings.TrimSpace(msg.Text()) == "" {
+			continue
+		}
+
+		if (msg.Photo() != nil || msg.IsMedia()) && isEarlierAlbumTextCandidate(msg, i, photoTextMessage, photoTextIndex) {
+			photoTextMessage = msg
+			photoTextIndex = i
+		}
+
+		if isEarlierAlbumTextCandidate(msg, i, fallbackTextMessage, fallbackTextIndex) {
+			fallbackTextMessage = msg
+			fallbackTextIndex = i
+		}
+	}
+
+	if photoTextMessage != nil {
+		return photoTextMessage
+	}
+
+	return fallbackTextMessage
+}
+
+func isEarlierAlbumTextCandidate(candidate *telegram.NewMessage, candidateIndex int, current *telegram.NewMessage, currentIndex int) bool {
+	if candidate == nil {
+		return false
+	}
+	if current == nil {
+		return true
+	}
+
+	candidateID := candidate.ID
+	currentID := current.ID
+
+	if candidateID > 0 && currentID > 0 && candidateID != currentID {
+		return candidateID < currentID
+	}
+	if candidateID > 0 && currentID <= 0 {
+		return true
+	}
+	if candidateID <= 0 && currentID > 0 {
+		return false
+	}
+
+	return candidateIndex < currentIndex
+}
+
 func (h *Handler) ensureBotPeer(ctx context.Context) (telegram.InputPeer, error) {
 	// 1. Check cache first
 	if peer, ok := h.getBotPeer(); ok {
@@ -840,7 +895,7 @@ func (h *Handler) ensureBotPeer(ctx context.Context) (telegram.InputPeer, error)
 	return peer, nil
 }
 
-func (h *Handler) downloadAlbumData(ctx context.Context, a *telegram.Album) (ProfileData, func()) {
+func (h *Handler) downloadAlbumData(ctx context.Context, a *telegram.Album, profileText string) (ProfileData, func()) {
 	var data ProfileData
 	var photoPaths []string
 
@@ -855,14 +910,8 @@ func (h *Handler) downloadAlbumData(ctx context.Context, a *telegram.Album) (Pro
 		}
 	}
 
-	for _, msg := range a.Messages {
-		if text := msg.Text(); text != "" {
-			data.ProfileText = text
-			break
-		}
-	}
-
 	data.PhotoPaths = photoPaths
+	data.ProfileText = profileText
 
 	cleanup := func() {
 		for _, path := range photoPaths {

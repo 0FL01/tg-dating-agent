@@ -232,6 +232,43 @@ func TestHandleAlbumOwnProfileSkipUsesSameCorrelationRule(t *testing.T) {
 	}
 }
 
+func TestSelectAlbumTextSourceMessagePrefersPhotoCaptionOwnership(t *testing.T) {
+	messages := []*telegram.NewMessage{
+		{ID: 1, Message: &telegram.MessageObj{Message: "text-only intro"}},
+		{ID: 10, Message: &telegram.MessageObj{Message: "photo caption", Media: &telegram.MessageMediaPhoto{}}},
+		{ID: 12, Message: &telegram.MessageObj{Message: "later caption", Media: &telegram.MessageMediaPhoto{}}},
+	}
+
+	got := profileTextFromAlbumMessages(messages)
+	if got != "photo caption" {
+		t.Fatalf("profileTextFromAlbumMessages() = %q, want %q", got, "photo caption")
+	}
+}
+
+func TestSelectAlbumTextSourceMessageUsesMessageIDOrdering(t *testing.T) {
+	messages := []*telegram.NewMessage{
+		{ID: 200, Message: &telegram.MessageObj{Message: "second caption", Media: &telegram.MessageMediaPhoto{}}},
+		{ID: 150, Message: &telegram.MessageObj{Message: "first caption", Media: &telegram.MessageMediaPhoto{}}},
+	}
+
+	got := profileTextFromAlbumMessages(messages)
+	if got != "first caption" {
+		t.Fatalf("profileTextFromAlbumMessages() = %q, want %q", got, "first caption")
+	}
+}
+
+func TestSelectAlbumTextSourceMessageFallsBackToTextOnly(t *testing.T) {
+	messages := []*telegram.NewMessage{
+		{ID: 99, Message: &telegram.MessageObj{Message: "later text-only"}},
+		{ID: 80, Message: &telegram.MessageObj{Message: "earlier text-only"}},
+	}
+
+	got := profileTextFromAlbumMessages(messages)
+	if got != "earlier text-only" {
+		t.Fatalf("profileTextFromAlbumMessages() = %q, want %q", got, "earlier text-only")
+	}
+}
+
 func mustDequeueJob(t *testing.T, sm *StateMachine) ProfileJob {
 	t.Helper()
 
