@@ -1342,6 +1342,100 @@ func TestShutdownCancelsInFlightWorkerJobAndKeepsStoppedState(t *testing.T) {
 	}
 }
 
+func TestHandleMatchMessageTriggersFullShutdown(t *testing.T) {
+	summarizer := &blockingSummarizer{
+		started:  make(chan struct{}),
+		canceled: make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+
+	h := &Handler{
+		state: NewStateMachine(),
+		config: &standalone.Config{
+			DatingMBTIPrompt:     "mbti",
+			DatingMBTIAllowlist:  []string{"INTJ"},
+			DatingSkipLowQuality: false,
+		},
+		client:      summarizer,
+		model:       "model",
+		prompt:      "prompt",
+		temperature: 0.3,
+	}
+
+	h.StartWorker()
+	if ok := h.state.Enqueue(ProfileJob{Type: "album", Album: &telegram.Album{Messages: []*telegram.NewMessage{{
+		ID: 1,
+		Message: &telegram.MessageObj{
+			Message: "profile text",
+		},
+	}}}}); !ok {
+		t.Fatal("Enqueue() = false, want true")
+	}
+
+	mustReceiveSignal(t, summarizer.started, "blocking summarizer start")
+
+	lifecycleCtx := h.lifecycleContext()
+	err := h.Handle(&telegram.NewMessage{Message: &telegram.MessageObj{Message: "a person liked you"}})
+	if err != nil {
+		t.Fatalf("Handle() error = %v, want nil", err)
+	}
+
+	mustReceiveSignal(t, summarizer.canceled, "blocking summarizer cancellation")
+
+	if got := h.state.GetState(); got != StateStopped {
+		t.Fatalf("state after Handle(match) = %v, want %v", got, StateStopped)
+	}
+
+	select {
+	case <-h.state.ShouldQuit():
+		// expected
+	default:
+		t.Fatal("quit channel was not closed by match-triggered shutdown")
+	}
+
+	select {
+	case <-lifecycleCtx.Done():
+		// expected
+	case <-time.After(testSyncTimeout):
+		t.Fatal("lifecycle context was not canceled by match-triggered shutdown")
+	}
+}
+
+func TestStopTriggersFullShutdownAndCancelsContexts(t *testing.T) {
+	h := &Handler{state: NewStateMachine(), chatID: 123456789}
+	h.StartWorker()
+
+	lifecycleCtx := h.lifecycleContext()
+	workerCtx := h.state.WorkerContext()
+
+	h.Stop()
+
+	if got := h.state.GetState(); got != StateStopped {
+		t.Fatalf("state after Stop() = %v, want %v", got, StateStopped)
+	}
+
+	select {
+	case <-h.state.ShouldQuit():
+		// expected
+	default:
+		t.Fatal("quit channel was not closed by Stop()")
+	}
+
+	select {
+	case <-lifecycleCtx.Done():
+		// expected
+	case <-time.After(testSyncTimeout):
+		t.Fatal("lifecycle context was not canceled by Stop()")
+	}
+
+	select {
+	case <-workerCtx.Done():
+		// expected
+	case <-time.After(testSyncTimeout):
+		t.Fatal("worker context was not canceled by Stop()")
+	}
+}
+
 func TestHandleRetryMessageShutdownCancelsLifecycleAndPreventsPostStopSend(t *testing.T) {
 	tests := []struct {
 		name        string

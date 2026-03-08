@@ -20,6 +20,7 @@ import (
 )
 
 const DailyLimitPauseDuration = 24 * time.Hour
+const stopCommandTimeout = 10 * time.Second
 
 // jitterRand is a thread-safe local random generator for jitter calculations
 var jitterRand = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -108,7 +109,7 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 
 	if strings.Contains(strings.ToLower(text), PatternLikedYou) {
 		log.Printf("[%s] Received match notification, stopping", h.Name())
-		h.state.SetState(StateStopped)
+		h.Shutdown()
 		return nil
 	}
 
@@ -659,8 +660,11 @@ func (h *Handler) clickButtonWithContext(ctx context.Context, buttonText string)
 
 func (h *Handler) Stop() {
 	log.Printf("[%s] Stopping...", h.Name())
-	h.state.SetState(StateStopped)
-	_ = h.clickButton(ButtonSleep)
+	h.Shutdown()
+
+	ctx, cancel := context.WithTimeout(context.Background(), stopCommandTimeout)
+	defer cancel()
+	_ = h.clickButtonWithContext(ctx, ButtonSleep)
 }
 
 func (h *Handler) Start() {
