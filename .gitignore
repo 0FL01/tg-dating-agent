@@ -19,6 +19,8 @@ sessions/
 !internal/
 !pkg/
 !*.go
+# Stage 7 Slice 2: Allow tracking auth binary
+!/auth
 
 # Build artifacts
 /tg-dating-agent
