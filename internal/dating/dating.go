@@ -326,10 +326,7 @@ func (h *Handler) sendPendingMessage(m *telegram.NewMessage) error {
 		return h.tgClient.SendMessage(h.chatID, msg)
 	})
 
-	h.state.ClearPendingMessage()
-	h.state.ClearProfileData()
-	h.state.ResetRetry()
-	h.state.SetState(StateViewingProfiles)
+	h.finalizeSendState()
 
 	if err != nil {
 		log.Printf("[%s] Failed to send message: %v", h.Name(), err)
@@ -338,6 +335,10 @@ func (h *Handler) sendPendingMessage(m *telegram.NewMessage) error {
 
 	log.Printf("[%s] Message sent successfully", h.Name())
 	return nil
+}
+
+func (h *Handler) finalizeSendState() {
+	h.state.FinalizeSendState(StateWaitingPrompt)
 }
 
 func (h *Handler) retryGenerateMessage(retryType RetryType) error {
@@ -405,6 +406,8 @@ func (h *Handler) sendTruncatedMessage(msg string) error {
 	_, err := tghelper.RetryTelegram(ctx, "send_dating_message", func() (*telegram.NewMessage, error) {
 		return h.tgClient.SendMessage(h.chatID, msg)
 	})
+
+	h.finalizeSendState()
 
 	if err != nil {
 		log.Printf("[%s] Failed to send message: %v", h.Name(), err)

@@ -143,6 +143,22 @@ func (sm *StateMachine) ClearProfileData() {
 	sm.profileData = nil
 }
 
+func (sm *StateMachine) FinalizeSendState(expectedCurrent State) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.pendingMessage = ""
+	sm.profileData = nil
+	sm.retryCount = 0
+
+	if sm.state == expectedCurrent {
+		sm.state = StateViewingProfiles
+		return true
+	}
+
+	return false
+}
+
 func (sm *StateMachine) PauseFor(duration time.Duration) time.Time {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()

@@ -395,3 +395,67 @@ func TestHandleGenericTooManyStopsWithoutPause(t *testing.T) {
 		t.Fatalf("CheckPause(now) = (%v, %v, %v), want (false, false, zero)", paused, resumed, until)
 	}
 }
+
+func TestFinalizeSendStateResetsConversationInvariant(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+	h.state.SetState(StateWaitingPrompt)
+	h.state.SetPendingMessage("draft")
+	h.state.SetProfileData(&ProfileData{ProfileText: "bio", PhotoPaths: []string{"/tmp/photo.jpg"}})
+	h.state.IncrementRetry()
+
+	h.finalizeSendState()
+
+	if got := h.state.GetPendingMessage(); got != "" {
+		t.Fatalf("pending message = %q, want empty", got)
+	}
+
+	if got := h.state.GetProfileData(); got != nil {
+		t.Fatalf("profile data = %#v, want nil", got)
+	}
+
+	if got := h.state.GetRetryCount(); got != 0 {
+		t.Fatalf("retry count = %d, want 0", got)
+	}
+
+	if got := h.state.GetState(); got != StateViewingProfiles {
+		t.Fatalf("state = %v, want %v", got, StateViewingProfiles)
+	}
+}
+
+func TestFinalizeSendStateDoesNotOverrideTerminalStates(t *testing.T) {
+	tests := []struct {
+		name         string
+		initialState State
+	}{
+		{name: "idle", initialState: StateIdle},
+		{name: "stopped", initialState: StateStopped},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &Handler{state: NewStateMachine()}
+			h.state.SetState(tt.initialState)
+			h.state.SetPendingMessage("draft")
+			h.state.SetProfileData(&ProfileData{ProfileText: "bio", PhotoPaths: []string{"/tmp/photo.jpg"}})
+			h.state.IncrementRetry()
+
+			h.finalizeSendState()
+
+			if got := h.state.GetPendingMessage(); got != "" {
+				t.Fatalf("pending message = %q, want empty", got)
+			}
+
+			if got := h.state.GetProfileData(); got != nil {
+				t.Fatalf("profile data = %#v, want nil", got)
+			}
+
+			if got := h.state.GetRetryCount(); got != 0 {
+				t.Fatalf("retry count = %d, want 0", got)
+			}
+
+			if got := h.state.GetState(); got != tt.initialState {
+				t.Fatalf("state = %v, want %v", got, tt.initialState)
+			}
+		})
+	}
+}
