@@ -26,6 +26,7 @@ type Handler struct {
 	tgClient    *telegram.Client
 	state       *StateMachine
 	chatID      int64
+	botUsername string
 	model       string
 	prompt      string
 	actionDelay time.Duration
@@ -42,6 +43,7 @@ func NewHandler(cfg *standalone.Config, client llm.MultimodalSummarizer, tgClien
 		tgClient:    tgClient,
 		state:       NewStateMachine(),
 		chatID:      cfg.DatingBotChatID,
+		botUsername: cfg.DatingBotUsername,
 		model:       cfg.DatingModel,
 		prompt:      cfg.DatingPrompt,
 		actionDelay: cfg.DatingActionDelay,
