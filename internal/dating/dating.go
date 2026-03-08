@@ -357,6 +357,60 @@ func (h *Handler) getBotPeer() (telegram.InputPeer, bool) {
 	return peer, peer != nil
 }
 
+func (h *Handler) setBotPeer(peer telegram.InputPeer) {
+	h.botPeerMu.Lock()
+	h.botPeer = peer
+	h.botPeerMu.Unlock()
+}
+
+// resolveBotByUsername resolves bot username to InputPeer via Telegram API
+func (h *Handler) resolveBotByUsername(ctx context.Context) (telegram.InputPeer, error) {
+	if h.botUsername == "" {
+		return nil, fmt.Errorf("bot username is empty")
+	}
+
+	result, err := tghelper.RetryTelegram(ctx, "resolve_username", func() (*telegram.ContactsResolvedPeer, error) {
+		return h.tgClient.ContactsResolveUsername(h.botUsername, "")
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resolve username %q: %w", h.botUsername, err)
+	}
+
+	if result.Peer == nil {
+		return nil, fmt.Errorf("resolve username %q: peer is nil in response", h.botUsername)
+	}
+
+	// Convert Peer to InputPeer
+	switch p := result.Peer.(type) {
+	case *telegram.PeerUser:
+		if len(result.Users) == 0 {
+			return nil, fmt.Errorf("resolve username %q: no users in response", h.botUsername)
+		}
+		user, ok := result.Users[0].(*telegram.UserObj)
+		if !ok {
+			return nil, fmt.Errorf("resolve username %q: unexpected user type %T", h.botUsername, result.Users[0])
+		}
+		return &telegram.InputPeerUser{
+			UserID:     user.ID,
+			AccessHash: user.AccessHash,
+		}, nil
+	case *telegram.PeerChannel:
+		if len(result.Chats) == 0 {
+			return nil, fmt.Errorf("resolve username %q: no chats in response", h.botUsername)
+		}
+		channel, ok := result.Chats[0].(*telegram.Channel)
+		if !ok {
+			return nil, fmt.Errorf("resolve username %q: unexpected chat type %T", h.botUsername, result.Chats[0])
+		}
+		return &telegram.InputPeerChannel{
+			ChannelID:  channel.ID,
+			AccessHash: channel.AccessHash,
+		}, nil
+	default:
+		return nil, fmt.Errorf("resolve username %q: unexpected peer type %T", h.botUsername, p)
+	}
+}
+
 func (h *Handler) finalizeSendState() {
 	h.state.FinalizeSendState(StateWaitingPrompt)
 }
@@ -620,6 +674,7 @@ func (h *Handler) isPaused() bool {
 }
 
 func (h *Handler) ensureBotPeer(ctx context.Context) (telegram.InputPeer, error) {
+	// 1. Check cache first
 	if peer, ok := h.getBotPeer(); ok {
 		return peer, nil
 	}
@@ -628,6 +683,18 @@ func (h *Handler) ensureBotPeer(ctx context.Context) (telegram.InputPeer, error)
 		return nil, fmt.Errorf("dating peer is not cached yet for chat %d", h.chatID)
 	}
 
+	// 2. Try to resolve by username (works with empty cache)
+	if h.botUsername != "" {
+		resolvedPeer, err := h.resolveBotByUsername(ctx)
+		if err == nil {
+			h.setBotPeer(resolvedPeer)
+			log.Printf("[%s] Resolved bot peer via username: %s", h.Name(), h.botUsername)
+			return resolvedPeer, nil
+		}
+		log.Printf("[%s] Failed to resolve bot by username %q: %v", h.Name(), h.botUsername, err)
+	}
+
+	// 3. Fallback: try old methods (for backward compatibility)
 	peer, err := tghelper.RetryTelegram(ctx, "resolve_dating_peer_sendable", func() (telegram.InputPeer, error) {
 		return h.tgClient.GetSendablePeer(h.chatID)
 	})
@@ -640,10 +707,7 @@ func (h *Handler) ensureBotPeer(ctx context.Context) (telegram.InputPeer, error)
 		}
 	}
 
-	h.botPeerMu.Lock()
-	h.botPeer = peer
-	h.botPeerMu.Unlock()
-
+	h.setBotPeer(peer)
 	return peer, nil
 }
 
