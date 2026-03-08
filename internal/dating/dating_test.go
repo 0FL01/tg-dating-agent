@@ -1,6 +1,10 @@
 package dating
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/amarnathcjd/gogram/telegram"
+)
 
 func TestParseMBTI(t *testing.T) {
 	tests := []struct {
@@ -69,6 +73,75 @@ func TestIsMBTIAllowed(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isMBTIAllowed(tt.mbti, tt.allowlist); got != tt.want {
 				t.Fatalf("isMBTIAllowed(%q, %v) = %v, want %v", tt.mbti, tt.allowlist, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShouldRecoverFromStuck(t *testing.T) {
+	tests := []struct {
+		name    string
+		state   State
+		message *telegram.NewMessage
+		want    bool
+	}{
+		{
+			name:  "viewing state with view profiles button",
+			state: StateViewingProfiles,
+			message: &telegram.NewMessage{
+				Message: &telegram.MessageObj{
+					ReplyMarkup: &telegram.ReplyKeyboardMarkup{
+						Rows: []*telegram.KeyboardButtonRow{
+							{Buttons: []telegram.KeyboardButton{&telegram.KeyboardButtonObj{Text: ButtonViewProfiles}}},
+						},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name:  "viewing state with wrong button",
+			state: StateViewingProfiles,
+			message: &telegram.NewMessage{
+				Message: &telegram.MessageObj{
+					ReplyMarkup: &telegram.ReplyKeyboardMarkup{
+						Rows: []*telegram.KeyboardButtonRow{
+							{Buttons: []telegram.KeyboardButton{&telegram.KeyboardButtonObj{Text: ButtonDislike}}},
+						},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name:    "viewing state with no button",
+			state:   StateViewingProfiles,
+			message: &telegram.NewMessage{Message: &telegram.MessageObj{}},
+			want:    false,
+		},
+		{
+			name:  "non viewing state with view profiles button",
+			state: StateIdle,
+			message: &telegram.NewMessage{
+				Message: &telegram.MessageObj{
+					ReplyMarkup: &telegram.ReplyKeyboardMarkup{
+						Rows: []*telegram.KeyboardButtonRow{
+							{Buttons: []telegram.KeyboardButton{&telegram.KeyboardButtonObj{Text: ButtonViewProfiles}}},
+						},
+					},
+				},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &Handler{state: NewStateMachine()}
+			h.state.SetState(tt.state)
+
+			if got := h.shouldRecoverFromStuck(tt.message); got != tt.want {
+				t.Fatalf("shouldRecoverFromStuck() = %v, want %v", got, tt.want)
 			}
 		})
 	}
