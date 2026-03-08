@@ -1,6 +1,7 @@
 package dating
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -635,5 +636,76 @@ func TestFinalizeSendStateDoesNotOverrideTerminalStates(t *testing.T) {
 				t.Fatalf("state = %v, want %v", got, tt.initialState)
 			}
 		})
+	}
+}
+
+func TestBootstrapWithActionsSkipsWhenPaused(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+	h.state.PauseFor(time.Hour)
+
+	called := 0
+	err := h.bootstrapWithActions(func() error {
+		called++
+		return nil
+	}, func() error {
+		called++
+		return nil
+	})
+
+	if err != nil {
+		t.Fatalf("bootstrapWithActions() error = %v, want nil", err)
+	}
+
+	if called != 0 {
+		t.Fatalf("bootstrap actions called %d times, want 0", called)
+	}
+}
+
+func TestBootstrapWithActionsSequencing(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+
+	steps := make([]string, 0, 2)
+	err := h.bootstrapWithActions(func() error {
+		steps = append(steps, "start")
+		return nil
+	}, func() error {
+		steps = append(steps, "search")
+		return nil
+	})
+
+	if err != nil {
+		t.Fatalf("bootstrapWithActions() error = %v, want nil", err)
+	}
+
+	if len(steps) != 2 {
+		t.Fatalf("steps len = %d, want 2", len(steps))
+	}
+
+	if steps[0] != "start" || steps[1] != "search" {
+		t.Fatalf("steps = %v, want [start search]", steps)
+	}
+}
+
+func TestBootstrapWithActionsStillRunsSearchWhenStartFails(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+
+	searchCalled := false
+	err := h.bootstrapWithActions(func() error {
+		return errors.New("start failed")
+	}, func() error {
+		searchCalled = true
+		return nil
+	})
+
+	if err == nil {
+		t.Fatal("bootstrapWithActions() error = nil, want non-nil")
+	}
+
+	if !searchCalled {
+		t.Fatal("search action was not called after start failure")
+	}
+
+	if !strings.Contains(err.Error(), "send /start") {
+		t.Fatalf("bootstrapWithActions() error = %v, want send /start details", err)
 	}
 }

@@ -59,6 +59,10 @@ func main() {
 		return handler.HandleAlbum(a)
 	})
 
+	if err := handler.Bootstrap(); err != nil {
+		log.Printf("Dating startup bootstrap failed (non-fatal): %v", err)
+	}
+
 	log.Printf("Dating Agent ready! Listening for profiles from chat ID: %d", cfg.DatingBotChatID)
 
 	go func() {

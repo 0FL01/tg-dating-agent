@@ -481,13 +481,12 @@ func (h *Handler) clickButton(buttonText string) error {
 	time.Sleep(h.actionDelay)
 
 	ctx := context.Background()
-	peer, ok := h.getBotPeer()
-	if !ok {
-		err := fmt.Errorf("dating peer is not cached yet for chat %d", h.chatID)
+	peer, err := h.ensureBotPeer(ctx)
+	if err != nil {
 		log.Printf("[%s] %v", h.Name(), err)
 		return err
 	}
-	_, err := tghelper.RetryTelegram(ctx, "click_button", func() (*telegram.NewMessage, error) {
+	_, err = tghelper.RetryTelegram(ctx, "click_button", func() (*telegram.NewMessage, error) {
 		return h.tgClient.SendMessage(peer, buttonText)
 	})
 
@@ -506,6 +505,61 @@ func (h *Handler) Stop() {
 func (h *Handler) Start() {
 	log.Printf("[%s] Starting...", h.Name())
 	h.state.SetState(StateIdle)
+}
+
+func (h *Handler) Bootstrap() error {
+	return h.bootstrapWithActions(func() error {
+		return h.sendBootstrapCommand("/start")
+	}, func() error {
+		return h.clickButton(ButtonViewProfiles)
+	})
+}
+
+func (h *Handler) bootstrapWithActions(sendStart func() error, startSearch func() error) error {
+	if h.isPaused() {
+		log.Printf("[%s] Startup bootstrap skipped: pause is active", h.Name())
+		return nil
+	}
+
+	log.Printf("[%s] Startup bootstrap: sending /start then %s", h.Name(), ButtonViewProfiles)
+
+	startErr := sendStart()
+	if startErr != nil {
+		log.Printf("[%s] Startup bootstrap: /start failed: %v", h.Name(), startErr)
+	}
+
+	searchErr := startSearch()
+	if searchErr != nil {
+		log.Printf("[%s] Startup bootstrap: %s failed: %v", h.Name(), ButtonViewProfiles, searchErr)
+	}
+
+	if startErr != nil || searchErr != nil {
+		return fmt.Errorf("startup bootstrap errors: send /start: %v; start search: %v", startErr, searchErr)
+	}
+
+	log.Printf("[%s] Startup bootstrap completed", h.Name())
+	return nil
+}
+
+func (h *Handler) sendBootstrapCommand(command string) error {
+	log.Printf("[%s] Sending bootstrap command: %s (delay: %v)", h.Name(), command, h.actionDelay)
+
+	time.Sleep(h.actionDelay)
+
+	ctx := context.Background()
+	peer, err := h.ensureBotPeer(ctx)
+	if err != nil {
+		return err
+	}
+
+	_, err = tghelper.RetryTelegram(ctx, "bootstrap_send_start", func() (*telegram.NewMessage, error) {
+		return h.tgClient.SendMessage(peer, command)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to send bootstrap command %q: %w", command, err)
+	}
+
+	return nil
 }
 
 func (h *Handler) HandleAlbum(a *telegram.Album) error {
@@ -573,6 +627,34 @@ func (h *Handler) isPaused() bool {
 	}
 
 	return false
+}
+
+func (h *Handler) ensureBotPeer(ctx context.Context) (telegram.InputPeer, error) {
+	if peer, ok := h.getBotPeer(); ok {
+		return peer, nil
+	}
+
+	if h.tgClient == nil {
+		return nil, fmt.Errorf("dating peer is not cached yet for chat %d", h.chatID)
+	}
+
+	peer, err := tghelper.RetryTelegram(ctx, "resolve_dating_peer_sendable", func() (telegram.InputPeer, error) {
+		return h.tgClient.GetSendablePeer(h.chatID)
+	})
+	if err != nil {
+		peer, err = tghelper.RetryTelegram(ctx, "resolve_dating_peer_input", func() (telegram.InputPeer, error) {
+			return h.tgClient.GetInputPeer(h.chatID)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("dating peer is not cached yet for chat %d and resolve failed: %w", h.chatID, err)
+		}
+	}
+
+	h.botPeerMu.Lock()
+	h.botPeer = peer
+	h.botPeerMu.Unlock()
+
+	return peer, nil
 }
 
 func (h *Handler) downloadAlbumData(ctx context.Context, a *telegram.Album) (ProfileData, func()) {
