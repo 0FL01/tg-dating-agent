@@ -6,12 +6,65 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/0FL01/tg-dating-agent/internal/dating"
 	"github.com/0FL01/tg-dating-agent/internal/standalone"
 	"github.com/amarnathcjd/gogram/telegram"
 )
+
+type shutdownHandler interface {
+	Shutdown()
+}
+
+type stoppableClient interface {
+	Stop() error
+}
+
+func runMainLoop(idle func(), sigCh <-chan os.Signal, shutdown func()) {
+	idleDone := make(chan struct{})
+	go func() {
+		defer close(idleDone)
+		idle()
+	}()
+
+	var shutdownDone <-chan struct{}
+
+	for {
+		select {
+		case <-sigCh:
+			if shutdownDone != nil {
+				continue
+			}
+
+			done := make(chan struct{})
+			shutdownDone = done
+			go func(done chan struct{}) {
+				defer close(done)
+				shutdown()
+			}(done)
+		case <-idleDone:
+			if shutdownDone != nil {
+				<-shutdownDone
+			}
+			return
+		}
+	}
+}
+
+func orchestrateShutdown(handler shutdownHandler, client stoppableClient) {
+	shutdownDone := make(chan struct{})
+
+	go func() {
+		defer close(shutdownDone)
+		handler.Shutdown()
+	}()
+
+	if err := client.Stop(); err != nil {
+		log.Printf("Failed to stop Telegram client: %v", err)
+	}
+
+	<-shutdownDone
+}
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -69,23 +122,13 @@ func main() {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 
-	go func() {
-		<-sigCh
-		log.Println("Received shutdown signal, entering sleep mode...")
-
-		// 1. Отправляем 💤 и переводим в StateStopped
-		handler.Stop()
-
-		// 2. Останавливаем worker goroutine
-		handler.StopWorker()
-
-		// 3. Даём время на отправку сообщения
-		time.Sleep(5 * time.Second)
-
+	runMainLoop(result.Client.Idle, sigCh, func() {
+		log.Println("Received shutdown signal, stopping worker...")
+		orchestrateShutdown(handler, result.Client)
 		log.Println("Dating Agent stopped gracefully")
-	}()
+	})
 
-	result.Client.Idle()
 	log.Println("Dating Agent stopped")
 }
