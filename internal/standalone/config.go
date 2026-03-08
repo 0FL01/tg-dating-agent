@@ -26,6 +26,7 @@ type Config struct {
 
 	// Dating bot settings (full set as used by internal/skills/dating)
 	DatingBotChatID      int64
+	DatingBotUsername    string
 	DatingModel          string
 	DatingPrompt         string
 	DatingMBTIPrompt     string
@@ -39,6 +40,7 @@ type Config struct {
 // Default values for Dating configuration.
 const (
 	DefaultDatingBotChatID    int64 = 1234060895
+	DefaultDatingBotUsername        = "leomatchbot"
 	DefaultDatingModel              = "google/gemini-2.5-flash-lite-preview-06-2025"
 	DefaultDatingActionDelay        = 3 * time.Second
 	DefaultDatingTemperature        = 0.7
@@ -123,6 +125,12 @@ func Load() (*Config, error) {
 		}
 	}
 
+	// Dating: Bot Username
+	datingBotUsername := DefaultDatingBotUsername
+	if v := os.Getenv("DATING_BOT_USERNAME"); v != "" {
+		datingBotUsername = v
+	}
+
 	// Dating: Model
 	datingModel := os.Getenv("DATING_MODEL")
 	if datingModel == "" {
@@ -191,6 +199,7 @@ func Load() (*Config, error) {
 		OpenRouterAPIKey:     apiKey,
 		OpenRouterModel:      model,
 		DatingBotChatID:      datingBotChatID,
+		DatingBotUsername:    datingBotUsername,
 		DatingModel:          datingModel,
 		DatingPrompt:         datingPrompt,
 		DatingMBTIPrompt:     datingMBTIPrompt,
