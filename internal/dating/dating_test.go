@@ -3,12 +3,15 @@ package dating
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	"github.com/amarnathcjd/gogram/telegram"
 )
+
+const testSyncTimeout = 2 * time.Second
 
 func TestTruncateMessageASCII(t *testing.T) {
 	tests := []struct {
@@ -232,6 +235,233 @@ func TestHandleAlbumOwnProfileSkipUsesSameCorrelationRule(t *testing.T) {
 	}
 }
 
+func TestBootstrapWithActionsSequencingWhileHandlersMutateOwnProfileState(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+
+	startEntered := make(chan struct{})
+	allowStart := make(chan struct{})
+	searchCalled := make(chan struct{}, 1)
+	done := make(chan error, 1)
+
+	go func() {
+		done <- h.bootstrapWithActions(func() error {
+			close(startEntered)
+			<-allowStart
+			return nil
+		}, func() error {
+			searchCalled <- struct{}{}
+			return nil
+		})
+	}()
+
+	mustReceiveSignal(t, startEntered, "bootstrap sendStart entry")
+
+	marker := &telegram.NewMessage{ID: 100, Message: &telegram.MessageObj{
+		Message: "Your profile",
+		PeerID:  &telegram.PeerUser{UserID: h.chatID},
+	}}
+	if err := h.Handle(marker); err != nil {
+		t.Fatalf("Handle(marker) error = %v", err)
+	}
+
+	ownProfileMedia := &telegram.NewMessage{ID: 101, Message: &telegram.MessageObj{
+		Media:  &telegram.MessageMediaPhoto{},
+		PeerID: &telegram.PeerUser{UserID: h.chatID},
+	}}
+	if err := h.Handle(ownProfileMedia); err != nil {
+		t.Fatalf("Handle(ownProfileMedia) error = %v", err)
+	}
+
+	profileMedia := &telegram.NewMessage{ID: 105, Message: &telegram.MessageObj{
+		Media:  &telegram.MessageMediaPhoto{},
+		PeerID: &telegram.PeerUser{UserID: h.chatID},
+	}}
+	if err := h.Handle(profileMedia); err != nil {
+		t.Fatalf("Handle(profileMedia) error = %v", err)
+	}
+
+	select {
+	case <-searchCalled:
+		t.Fatal("startSearch called before sendStart unblocked")
+	default:
+	}
+
+	close(allowStart)
+
+	if err := mustReceiveError(t, done, "bootstrap completion"); err != nil {
+		t.Fatalf("bootstrapWithActions() error = %v, want nil", err)
+	}
+
+	select {
+	case <-searchCalled:
+	default:
+		t.Fatal("startSearch was not called")
+	}
+
+	job1 := mustDequeueJob(t, h.state)
+	if job1.Type != "menu_recovery" {
+		t.Fatalf("first queued job type = %q, want %q", job1.Type, "menu_recovery")
+	}
+
+	job2 := mustDequeueJob(t, h.state)
+	if job2.Type != "message" || job2.Message == nil || job2.Message.ID != 105 {
+		t.Fatalf("second queued job = %+v, want media message id 105", job2)
+	}
+}
+
+func TestHandleOwnProfileSkipConcurrentInterleavingQueuesExpectedOutcomes(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+
+	marker := &telegram.NewMessage{ID: 100, Message: &telegram.MessageObj{
+		Message: "Your profile",
+		PeerID:  &telegram.PeerUser{UserID: h.chatID},
+	}}
+	if err := h.Handle(marker); err != nil {
+		t.Fatalf("Handle(marker) error = %v", err)
+	}
+
+	wrongFirstMedia := &telegram.NewMessage{ID: 110, Message: &telegram.MessageObj{
+		Media:  &telegram.MessageMediaPhoto{},
+		PeerID: &telegram.PeerUser{UserID: h.chatID},
+	}}
+	ownProfileMedia := &telegram.NewMessage{ID: 101, Message: &telegram.MessageObj{
+		Media:  &telegram.MessageMediaPhoto{},
+		PeerID: &telegram.PeerUser{UserID: h.chatID},
+	}}
+
+	start := make(chan struct{})
+	errCh := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		<-start
+		errCh <- h.Handle(wrongFirstMedia)
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-start
+		errCh <- h.Handle(ownProfileMedia)
+	}()
+
+	close(start)
+	waitGroupWithTimeout(t, &wg, "concurrent own-profile handlers")
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("Handle() error = %v, want nil", err)
+		}
+	}
+
+	jobs := []ProfileJob{mustDequeueJob(t, h.state), mustDequeueJob(t, h.state)}
+	seenMedia := false
+	seenMenuRecovery := false
+	for _, job := range jobs {
+		switch job.Type {
+		case "message":
+			if job.Message == nil || job.Message.ID != 110 {
+				t.Fatalf("queued message job = %+v, want media message id 110", job)
+			}
+			if seenMedia {
+				t.Fatalf("duplicate message job detected: %+v", jobs)
+			}
+			seenMedia = true
+		case "menu_recovery":
+			if seenMenuRecovery {
+				t.Fatalf("duplicate menu_recovery job detected: %+v", jobs)
+			}
+			seenMenuRecovery = true
+		default:
+			t.Fatalf("unexpected queued job type %q in %+v", job.Type, jobs)
+		}
+	}
+
+	if !seenMedia || !seenMenuRecovery {
+		t.Fatalf("queued jobs = %+v, want one message(id=110) and one menu_recovery", jobs)
+	}
+}
+
+func TestBotPeerCacheConcurrentReadWrite(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+
+	makeMsg := func(userID int64, accessHash int64) *telegram.NewMessage {
+		return &telegram.NewMessage{
+			Peer: &telegram.InputPeerUser{UserID: userID, AccessHash: accessHash},
+			Message: &telegram.MessageObj{
+				PeerID: &telegram.PeerUser{UserID: h.chatID},
+			},
+		}
+	}
+
+	h.cacheBotPeer(makeMsg(1, 1))
+
+	const writers = 8
+	const readers = 8
+	const iterations = 200
+
+	errCh := make(chan error, readers)
+	var wg sync.WaitGroup
+
+	for w := range writers {
+		w := w
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range iterations {
+				userID := int64(w*iterations + i + 2)
+				h.cacheBotPeer(makeMsg(userID, userID+1000))
+			}
+		}()
+	}
+
+	for range readers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range iterations {
+				peer, ok := h.getBotPeer()
+				if !ok || peer == nil {
+					errCh <- errors.New("getBotPeer() returned empty cache during concurrent access")
+					return
+				}
+				if _, typeOK := peer.(*telegram.InputPeerUser); !typeOK {
+					errCh <- errors.New("getBotPeer() returned unexpected peer type")
+					return
+				}
+			}
+		}()
+	}
+
+	waitGroupWithTimeout(t, &wg, "bot peer cache concurrent read/write workers")
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	final := makeMsg(4242, 7777)
+	h.cacheBotPeer(final)
+
+	peer, ok := h.getBotPeer()
+	if !ok {
+		t.Fatal("getBotPeer() ok = false, want true")
+	}
+
+	userPeer, typeOK := peer.(*telegram.InputPeerUser)
+	if !typeOK {
+		t.Fatalf("getBotPeer() type = %T, want *telegram.InputPeerUser", peer)
+	}
+
+	if userPeer.UserID != 4242 || userPeer.AccessHash != 7777 {
+		t.Fatalf("cached peer = %#v, want UserID=4242 AccessHash=7777", userPeer)
+	}
+}
+
 func TestSelectAlbumTextSourceMessagePrefersPhotoCaptionOwnership(t *testing.T) {
 	messages := []*telegram.NewMessage{
 		{ID: 1, Message: &telegram.MessageObj{Message: "text-only intro"}},
@@ -280,6 +510,41 @@ func mustDequeueJob(t *testing.T, sm *StateMachine) ProfileJob {
 	}
 
 	return ProfileJob{}
+}
+
+func mustReceiveSignal(t *testing.T, ch <-chan struct{}, waitFor string) {
+	t.Helper()
+
+	select {
+	case <-ch:
+	case <-time.After(testSyncTimeout):
+		t.Fatalf("timeout waiting for %s", waitFor)
+	}
+}
+
+func mustReceiveError(t *testing.T, ch <-chan error, waitFor string) error {
+	t.Helper()
+
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(testSyncTimeout):
+		t.Fatalf("timeout waiting for %s", waitFor)
+	}
+
+	return nil
+}
+
+func waitGroupWithTimeout(t *testing.T, wg *sync.WaitGroup, waitFor string) {
+	t.Helper()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	mustReceiveSignal(t, done, waitFor)
 }
 
 func TestTruncateMessageUTF8(t *testing.T) {
