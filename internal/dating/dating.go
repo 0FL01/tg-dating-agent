@@ -148,18 +148,11 @@ func (h *Handler) shouldRecoverFromStuck(m *telegram.NewMessage) bool {
 		return false
 	}
 
-	return isKnownTextOnlyInterstitial(m.Text())
+	return isNonEmptyTextOnlyMessage(m.Text())
 }
 
-func isKnownTextOnlyInterstitial(text string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(text))
-	if normalized == "" {
-		return false
-	}
-
-	return strings.Contains(normalized, PatternInterstitialSubscribeChannel) ||
-		strings.Contains(normalized, PatternInterstitialInternetSafety) ||
-		strings.Contains(normalized, PatternInterstitialTikTokPromo)
+func isNonEmptyTextOnlyMessage(text string) bool {
+	return strings.TrimSpace(text) != ""
 }
 
 func isDailyLimitMessage(text string) bool {

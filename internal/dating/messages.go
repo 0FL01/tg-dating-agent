@@ -5,16 +5,13 @@ const (
 )
 
 const (
-	PatternLikedYou                     = "person liked you"
-	PatternWriteMessage                 = "Write a message"
-	PatternViewProfiles                 = "View profiles"
-	PatternInterstitialSubscribeChannel = "subscribe to my channel"
-	PatternInterstitialInternetSafety   = "please note that people on the internet"
-	PatternInterstitialTikTokPromo      = "do you want more views on tiktok? #leomatch"
-	PatternTooLong                      = "message is too long"
-	PatternTooShort                     = "message is too short"
-	PatternDailyLimitExact              = "Too many ❤️ today.\n\nInvite friends to get more ❤️!\n\nShare it with your friends/on your social media!\nYour personal link👇"
-	PatternTooManyLikes                 = "too many"
+	PatternLikedYou        = "person liked you"
+	PatternWriteMessage    = "Write a message"
+	PatternViewProfiles    = "View profiles"
+	PatternTooLong         = "message is too long"
+	PatternTooShort        = "message is too short"
+	PatternDailyLimitExact = "Too many ❤️ today.\n\nInvite friends to get more ❤️!\n\nShare it with your friends/on your social media!\nYour personal link👇"
+	PatternTooManyLikes    = "too many"
 )
 
 const (
