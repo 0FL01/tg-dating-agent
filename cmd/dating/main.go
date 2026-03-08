@@ -6,6 +6,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/0FL01/tg-dating-agent/internal/dating"
 	"github.com/0FL01/tg-dating-agent/internal/standalone"
@@ -71,8 +72,18 @@ func main() {
 
 	go func() {
 		<-sigCh
-		log.Println("Received shutdown signal, stopping worker...")
+		log.Println("Received shutdown signal, entering sleep mode...")
+
+		// 1. Отправляем 💤 и переводим в StateStopped
+		handler.Stop()
+
+		// 2. Останавливаем worker goroutine
 		handler.StopWorker()
+
+		// 3. Даём время на отправку сообщения
+		time.Sleep(5 * time.Second)
+
+		log.Println("Dating Agent stopped gracefully")
 	}()
 
 	result.Client.Idle()
