@@ -39,11 +39,13 @@ type Handler struct {
 	jitterDelay     time.Duration
 	temperature     float64
 	sendMessageFn   func(context.Context, telegram.InputPeer, string) error
+	sendSleepFn     func(context.Context) error
 	botPeerMu       sync.RWMutex
 	botPeer         telegram.InputPeer
 	lifecycleMu     sync.Mutex
 	lifecycleCtx    context.Context
 	lifecycleCancel context.CancelFunc
+	stopSleepOnce   sync.Once
 }
 
 // NewHandler creates a new dating handler
@@ -661,10 +663,21 @@ func (h *Handler) clickButtonWithContext(ctx context.Context, buttonText string)
 func (h *Handler) Stop() {
 	log.Printf("[%s] Stopping...", h.Name())
 	h.Shutdown()
+	h.stopSleepOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), stopCommandTimeout)
+		defer cancel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), stopCommandTimeout)
-	defer cancel()
-	_ = h.clickButtonWithContext(ctx, ButtonSleep)
+		if h.sendSleepFn != nil {
+			_ = h.sendSleepFn(ctx)
+			return
+		}
+
+		_ = h.clickButtonWithContext(ctx, ButtonSleep)
+	})
+}
+
+func (h *Handler) IsStopped() bool {
+	return h.state.IsStopped()
 }
 
 func (h *Handler) Start() {

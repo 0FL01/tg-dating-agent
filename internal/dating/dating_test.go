@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -1203,6 +1204,36 @@ func TestShutdownCancelsWorkerContext(t *testing.T) {
 		// expected
 	case <-time.After(testSyncTimeout):
 		t.Fatal("worker context was not canceled by Shutdown()")
+	}
+}
+
+func TestStopSendsInternalSleepCommandOnce(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+	var calls atomic.Int32
+
+	h.sendSleepFn = func(context.Context) error {
+		calls.Add(1)
+		return nil
+	}
+
+	const stopCalls = 32
+	var wg sync.WaitGroup
+	for i := 0; i < stopCalls; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.Stop()
+		}()
+	}
+
+	waitGroupWithTimeout(t, &wg, "concurrent Stop calls")
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("internal sleep command calls = %d, want 1", got)
+	}
+
+	if got := h.state.GetState(); got != StateStopped {
+		t.Fatalf("state after Stop() = %v, want %v", got, StateStopped)
 	}
 }
 

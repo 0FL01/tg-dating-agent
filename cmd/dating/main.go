@@ -66,6 +66,21 @@ func orchestrateShutdown(handler shutdownHandler, client stoppableClient) {
 	<-shutdownDone
 }
 
+func shouldHandleOutgoingStop(chatID, datingBotChatID int64, text string, stopped bool) bool {
+	if chatID != datingBotChatID {
+		return false
+	}
+
+	switch strings.TrimSpace(text) {
+	case "*stop":
+		return true
+	case dating.ButtonSleep:
+		return !stopped
+	default:
+		return false
+	}
+}
+
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 	log.Println("Starting Dating Agent...")
@@ -99,8 +114,7 @@ func main() {
 	})
 
 	result.Client.On("message", func(m *telegram.NewMessage) error {
-		text := strings.TrimSpace(m.Text())
-		if text == "*stop" || text == "💤" {
+		if shouldHandleOutgoingStop(m.ChatID(), cfg.DatingBotChatID, m.Text(), handler.IsStopped()) {
 			handler.Stop()
 			_, _ = m.Reply(dating.StatusStopped)
 		}

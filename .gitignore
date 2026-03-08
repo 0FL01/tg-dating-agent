@@ -25,6 +25,7 @@ sessions/
 # Build artifacts
 /tg-dating-agent
 /tg-dating-agent.exe
+/dating
 *.exe
 *.dll
 *.so

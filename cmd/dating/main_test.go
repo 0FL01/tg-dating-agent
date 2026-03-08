@@ -156,3 +156,73 @@ func TestRunMainLoop_NoSignalNoShutdown(t *testing.T) {
 		t.Fatalf("expected no shutdown calls without signal, got %d", got)
 	}
 }
+
+func TestShouldHandleOutgoingStop(t *testing.T) {
+	tests := []struct {
+		name    string
+		text    string
+		stopped bool
+		chatID  int64
+		botID   int64
+		want    bool
+	}{
+		{
+			name:    "explicit stop command",
+			text:    "*stop",
+			stopped: false,
+			chatID:  100,
+			botID:   100,
+			want:    true,
+		},
+		{
+			name:    "stop command with surrounding spaces",
+			text:    "  *stop  ",
+			stopped: true,
+			chatID:  100,
+			botID:   100,
+			want:    true,
+		},
+		{
+			name:    "manual sleep command while running",
+			text:    "💤",
+			stopped: false,
+			chatID:  100,
+			botID:   100,
+			want:    true,
+		},
+		{
+			name:    "internal sleep message is ignored when already stopped",
+			text:    "💤",
+			stopped: true,
+			chatID:  100,
+			botID:   100,
+			want:    false,
+		},
+		{
+			name:    "stop command from wrong chat is ignored",
+			text:    "*stop",
+			stopped: false,
+			chatID:  200,
+			botID:   100,
+			want:    false,
+		},
+		{
+			name:    "non stop message",
+			text:    "hello",
+			stopped: false,
+			chatID:  100,
+			botID:   100,
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldHandleOutgoingStop(tt.chatID, tt.botID, tt.text, tt.stopped); got != tt.want {
+				t.Fatalf("shouldHandleOutgoingStop(chatID=%d, botID=%d, text=%q, stopped=%v) = %v, want %v", tt.chatID, tt.botID, tt.text, tt.stopped, got, tt.want)
+			}
+		})
+	}
+}
