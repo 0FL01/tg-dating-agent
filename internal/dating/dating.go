@@ -119,6 +119,11 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 		return h.processProfile(m)
 	}
 
+	if h.state.GetState() == StateViewingProfiles && hasReplyKeyboardButtonText(m, ButtonViewProfiles) {
+		log.Printf("[%s] Recovering viewing flow from text-only message via reply keyboard", h.Name())
+		return h.clickButton(ButtonViewProfiles)
+	}
+
 	return nil
 }
 
