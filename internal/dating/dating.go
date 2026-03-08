@@ -415,17 +415,25 @@ func (h *Handler) sendTruncatedMessage(msg string) error {
 }
 
 func truncateMessage(msg string, maxLen int) string {
-	if len(msg) <= maxLen {
+	runes := []rune(msg)
+	if len(runes) <= maxLen {
 		return msg
 	}
 
-	truncated := msg[:maxLen]
-	lastSpace := strings.LastIndex(truncated, " ")
-	if lastSpace > maxLen/2 {
-		return truncated[:lastSpace]
+	truncatedRunes := runes[:maxLen]
+	lastSpace := -1
+	for i := len(truncatedRunes) - 1; i >= 0; i-- {
+		if truncatedRunes[i] == ' ' {
+			lastSpace = i
+			break
+		}
 	}
 
-	return truncated
+	if lastSpace > maxLen/2 {
+		return string(truncatedRunes[:lastSpace])
+	}
+
+	return string(truncatedRunes)
 }
 
 func (h *Handler) clickButton(buttonText string) error {

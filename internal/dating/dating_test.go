@@ -3,9 +3,86 @@ package dating
 import (
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/amarnathcjd/gogram/telegram"
 )
+
+func TestTruncateMessageASCII(t *testing.T) {
+	tests := []struct {
+		name   string
+		msg    string
+		maxLen int
+		want   string
+	}{
+		{
+			name:   "shorter than limit unchanged",
+			msg:    "hello",
+			maxLen: 10,
+			want:   "hello",
+		},
+		{
+			name:   "truncate by last space when far enough",
+			msg:    "hello world from bot",
+			maxLen: 12,
+			want:   "hello world",
+		},
+		{
+			name:   "fallback to hard truncation when last space too early",
+			msg:    "hi therefriend",
+			maxLen: 8,
+			want:   "hi there",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := truncateMessage(tt.msg, tt.maxLen); got != tt.want {
+				t.Fatalf("truncateMessage(%q, %d) = %q, want %q", tt.msg, tt.maxLen, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTruncateMessageUTF8(t *testing.T) {
+	tests := []struct {
+		name      string
+		msg       string
+		maxLen    int
+		want      string
+		wantRunes int
+	}{
+		{
+			name:      "cyrillic with word boundary",
+			msg:       "Привет мир как дела",
+			maxLen:    12,
+			want:      "Привет мир",
+			wantRunes: 10,
+		},
+		{
+			name:      "emoji and cyrillic without spaces",
+			msg:       "Привет😊мир",
+			maxLen:    7,
+			want:      "Привет😊",
+			wantRunes: 7,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateMessage(tt.msg, tt.maxLen)
+			if got != tt.want {
+				t.Fatalf("truncateMessage(%q, %d) = %q, want %q", tt.msg, tt.maxLen, got, tt.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("truncateMessage(%q, %d) returned invalid UTF-8: %q", tt.msg, tt.maxLen, got)
+			}
+			if gotRunes := utf8.RuneCountInString(got); gotRunes != tt.wantRunes {
+				t.Fatalf("truncateMessage(%q, %d) rune count = %d, want %d", tt.msg, tt.maxLen, gotRunes, tt.wantRunes)
+			}
+		})
+	}
+}
 
 func TestParseMBTI(t *testing.T) {
 	tests := []struct {
