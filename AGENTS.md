@@ -45,7 +45,7 @@ The default branch is `main`.
 └── env.example                  # Environment variables template
 
 ### Key Modules
-- **dating**: Profile queue (buffer 50), worker goroutine, MBTI filtering, message generation workflow, retry logic, button detection
+- **dating**: Profile queue (buffer 50), worker goroutine, MBTI filtering, message generation workflow, retry logic, button detection; own-profile skip via correlated context (message-id + TTL); deterministic album text binding (photo caption preference, message ID ordering)
 - **llm**: OpenRouter integration with image+text multimodal support
 - **standalone**: Configuration, authentication, and bootstrap wiring
 - **tghelper**: Resilient Telegram API operations with retry logic, exponential backoff, jitter
@@ -54,7 +54,7 @@ The default branch is `main`.
 
 ### 1. Patterns
 - **Worker Pool Pattern**: Profile queue (chan ProfileJob, buffer 50) with dedicated worker goroutine for sequential processing; handlers enqueue jobs; graceful shutdown via quitChan
-- **State Machine**: `StateMachine` tracks conversation state (idle, viewing, paused, stopped)
+- **State Machine**: `StateMachine` tracks conversation state (idle, viewing, paused, stopped); owns own-profile skip context under mutex with correlation by message ID window and TTL
 - **Retry Pattern**: All external calls use `tghelper.RetryTelegram` with exponential backoff and jitter; message retry handles too long/too short scenarios
 - **Multimodal LLM**: Profiles processed with photos + text for MBTI analysis and message generation
 - **Cleanup Pattern**: Deferred cleanup for temporary photo downloads
@@ -62,7 +62,7 @@ The default branch is `main`.
 - **Button Detection**: `markup.go` detects reply keyboard buttons for flow recovery
 
 ### 2. Conventions
-- **Testing**: Unit tests in `*_test.go` files alongside source
+- **Testing**: Unit tests in `*_test.go` files alongside source; race-focused tests in dating_test.go and state_test.go cover skip-context correlation, album text binding determinism, concurrent bot peer cache access, and bootstrap sequencing with state mutations
 - **Error Handling**: Log and continue; graceful degradation (skip profile on LLM failure)
 - **Configuration**: Environment variables with sensible defaults in `internal/standalone/config.go`
 - **Security**: Non-root Docker user, read-only root filesystem, tmpfs for /tmp
