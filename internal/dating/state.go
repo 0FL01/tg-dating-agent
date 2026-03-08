@@ -53,22 +53,31 @@ type StateMachine struct {
 	pausedUntil    time.Time
 	ownProfileSkip ownProfileSkipContext
 	// New fields for worker pool pattern:
-	profileQueue  chan ProfileJob // buffered channel for profile queue
-	quitChan      chan struct{}   // for graceful shutdown
-	workerDone    chan struct{}
-	workerActive  bool
-	acceptingWork bool
-	workerCtx     context.Context
-	workerCancel  context.CancelFunc
+	profileQueue    chan ProfileJob // buffered channel for profile queue
+	quitChan        chan struct{}   // for graceful shutdown
+	workerDone      chan struct{}
+	workerActive    bool
+	acceptingWork   bool
+	workerCtx       context.Context
+	workerCancel    context.CancelFunc
+	recoveryQueued  map[string]bool
+	groupedCaptions map[int64]groupedCaptionContext
 }
 
 const ownProfileSkipTTL = 45 * time.Second
 const ownProfileSkipMaxMessageGap int32 = 3
+const groupedCaptionTTL = 2 * time.Minute
 
 type ownProfileSkipContext struct {
 	markerMessageID int32
 	setAt           time.Time
 	active          bool
+}
+
+type groupedCaptionContext struct {
+	text      string
+	messageID int32
+	setAt     time.Time
 }
 
 func NewStateMachine() *StateMachine {
@@ -81,6 +90,11 @@ func NewStateMachine() *StateMachine {
 		quitChan:      make(chan struct{}),
 		workerDone:    workerDone,
 		acceptingWork: true,
+		recoveryQueued: map[string]bool{
+			"menu_recovery":  false,
+			"stuck_recovery": false,
+		},
+		groupedCaptions: make(map[int64]groupedCaptionContext),
 	}
 }
 
@@ -151,12 +165,38 @@ func (sm *StateMachine) Enqueue(job ProfileJob) bool {
 		return false
 	}
 
+	shouldDeduplicate := isRecoveryJobType(job.Type)
+	if shouldDeduplicate && sm.recoveryQueued[job.Type] {
+		return false
+	}
+
+	if shouldDeduplicate {
+		sm.recoveryQueued[job.Type] = true
+	}
+
 	select {
 	case sm.profileQueue <- job:
 		return true
 	default:
+		if shouldDeduplicate {
+			sm.recoveryQueued[job.Type] = false
+		}
 		return false // queue is full
 	}
+}
+
+func isRecoveryJobType(jobType string) bool {
+	return jobType == "menu_recovery" || jobType == "stuck_recovery"
+}
+
+func (sm *StateMachine) OnJobDequeued(jobType string) {
+	if !isRecoveryJobType(jobType) {
+		return
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.recoveryQueued[jobType] = false
 }
 
 func (sm *StateMachine) StopAcceptingWork() {
@@ -173,6 +213,7 @@ func (sm *StateMachine) BeginShutdown() {
 	sm.state = StateStopped
 	sm.acceptingWork = false
 	sm.ownProfileSkip = ownProfileSkipContext{}
+	sm.groupedCaptions = make(map[int64]groupedCaptionContext)
 }
 
 // GetQueue returns the receive-only channel for the profile queue
@@ -386,4 +427,50 @@ func (sm *StateMachine) ConsumeOwnProfileSkip(candidateMessageID int32, now time
 
 	sm.ownProfileSkip = ownProfileSkipContext{}
 	return true
+}
+
+func (sm *StateMachine) RememberGroupedCaption(groupedID int64, text string, messageID int32, now time.Time) {
+	if groupedID == 0 {
+		return
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.pruneGroupedCaptionsLocked(now)
+
+	sm.groupedCaptions[groupedID] = groupedCaptionContext{
+		text:      text,
+		messageID: messageID,
+		setAt:     now,
+	}
+}
+
+func (sm *StateMachine) ConsumeGroupedCaption(groupedID int64, now time.Time) (string, bool) {
+	if groupedID == 0 {
+		return "", false
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.pruneGroupedCaptionsLocked(now)
+
+	entry, ok := sm.groupedCaptions[groupedID]
+	if !ok {
+		return "", false
+	}
+	delete(sm.groupedCaptions, groupedID)
+
+	if now.Sub(entry.setAt) > groupedCaptionTTL {
+		return "", false
+	}
+
+	return entry.text, true
+}
+
+func (sm *StateMachine) pruneGroupedCaptionsLocked(now time.Time) {
+	for groupedID, entry := range sm.groupedCaptions {
+		if now.Sub(entry.setAt) > groupedCaptionTTL {
+			delete(sm.groupedCaptions, groupedID)
+		}
+	}
 }

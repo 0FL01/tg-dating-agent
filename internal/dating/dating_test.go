@@ -279,6 +279,31 @@ func TestHandleGroupedMediaSkipsMessageEnqueue(t *testing.T) {
 	mustQueueEmpty(t, h.state)
 }
 
+func TestHandleGroupedMediaStoresCaptionForAlbumFallback(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+
+	msg := &telegram.NewMessage{ID: 403, Message: &telegram.MessageObj{
+		Message:   "grouped caption",
+		Media:     &telegram.MessageMediaPhoto{},
+		GroupedID: 778,
+		PeerID:    &telegram.PeerUser{UserID: h.chatID},
+	}}
+
+	if err := h.Handle(msg); err != nil {
+		t.Fatalf("Handle(grouped media with caption) error = %v", err)
+	}
+
+	mustQueueEmpty(t, h.state)
+
+	got, ok := h.state.ConsumeGroupedCaption(778, time.Now())
+	if !ok {
+		t.Fatal("ConsumeGroupedCaption() ok = false, want true")
+	}
+	if got != "grouped caption" {
+		t.Fatalf("ConsumeGroupedCaption() = %q, want %q", got, "grouped caption")
+	}
+}
+
 func TestHandleNonGroupedMediaStillEnqueuesMessageJob(t *testing.T) {
 	h := &Handler{chatID: 123456789, state: NewStateMachine()}
 
@@ -294,6 +319,45 @@ func TestHandleNonGroupedMediaStillEnqueuesMessageJob(t *testing.T) {
 	job := mustDequeueJob(t, h.state)
 	if job.Type != "message" || job.Message == nil || job.Message.ID != 402 {
 		t.Fatalf("queued job = %+v, want message job id 402", job)
+	}
+}
+
+func TestResolveAlbumProfileTextFallsBackToGroupedCaption(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+	h.state.RememberGroupedCaption(991, "caption from grouped message", 41, time.Now())
+
+	album := &telegram.Album{
+		Messages: []*telegram.NewMessage{
+			{
+				ID: 42,
+				Message: &telegram.MessageObj{
+					Media:     &telegram.MessageMediaPhoto{},
+					GroupedID: 991,
+				},
+			},
+		},
+	}
+
+	got := h.resolveAlbumProfileText(album)
+	if got != "caption from grouped message" {
+		t.Fatalf("resolveAlbumProfileText() = %q, want %q", got, "caption from grouped message")
+	}
+
+	if got := h.resolveAlbumProfileText(album); got != "" {
+		t.Fatalf("resolveAlbumProfileText() second call = %q, want empty after consume", got)
+	}
+}
+
+func TestFirstAlbumGroupedIDUsesLowestMessageID(t *testing.T) {
+	album := &telegram.Album{
+		Messages: []*telegram.NewMessage{
+			{ID: 300, Message: &telegram.MessageObj{GroupedID: 3}},
+			{ID: 250, Message: &telegram.MessageObj{GroupedID: 2}},
+		},
+	}
+
+	if got := firstAlbumGroupedID(album); got != 2 {
+		t.Fatalf("firstAlbumGroupedID() = %d, want 2", got)
 	}
 }
 
@@ -1652,5 +1716,22 @@ func TestBootstrapWithActionsStillRunsSearchWhenStartFails(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "send /start") {
 		t.Fatalf("bootstrapWithActions() error = %v, want send /start details", err)
+	}
+}
+
+func TestBootstrapWithActionsAllowsNilSearch(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+
+	steps := make([]string, 0, 1)
+	err := h.bootstrapWithActions(func() error {
+		steps = append(steps, "start")
+		return nil
+	}, nil)
+	if err != nil {
+		t.Fatalf("bootstrapWithActions() error = %v, want nil", err)
+	}
+
+	if len(steps) != 1 || steps[0] != "start" {
+		t.Fatalf("steps = %v, want [start]", steps)
 	}
 }

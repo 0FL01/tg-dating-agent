@@ -124,6 +124,24 @@ func TestStateMachineEnqueueRejectsAfterStopAcceptingWorkConcurrently(t *testing
 	}
 }
 
+func TestStateMachineEnqueueDeduplicatesRecoveryJobsUntilDequeued(t *testing.T) {
+	sm := NewStateMachine()
+
+	if ok := sm.Enqueue(ProfileJob{Type: "menu_recovery"}); !ok {
+		t.Fatal("first Enqueue(menu_recovery) = false, want true")
+	}
+
+	if ok := sm.Enqueue(ProfileJob{Type: "menu_recovery"}); ok {
+		t.Fatal("second Enqueue(menu_recovery) = true, want false")
+	}
+
+	sm.OnJobDequeued("menu_recovery")
+
+	if ok := sm.Enqueue(ProfileJob{Type: "menu_recovery"}); !ok {
+		t.Fatal("Enqueue(menu_recovery) after dequeue = false, want true")
+	}
+}
+
 func TestStateMachineBeginShutdownAtomicallyStopsAndRejectsEnqueue(t *testing.T) {
 	sm := NewStateMachine()
 	sm.MarkOwnProfileSkip(123, time.Now())
@@ -144,5 +162,35 @@ func TestStateMachineBeginShutdownAtomicallyStopsAndRejectsEnqueue(t *testing.T)
 
 	if ok := sm.Enqueue(ProfileJob{Type: "message"}); ok {
 		t.Fatal("Enqueue() after BeginShutdown() = true, want false")
+	}
+}
+
+func TestStateMachineGroupedCaptionConsumeLifecycle(t *testing.T) {
+	sm := NewStateMachine()
+	now := time.Unix(3000, 0)
+
+	sm.RememberGroupedCaption(777, "caption text", 10, now)
+
+	got, ok := sm.ConsumeGroupedCaption(777, now.Add(time.Second))
+	if !ok {
+		t.Fatal("ConsumeGroupedCaption() ok = false, want true")
+	}
+	if got != "caption text" {
+		t.Fatalf("ConsumeGroupedCaption() text = %q, want %q", got, "caption text")
+	}
+
+	if _, ok := sm.ConsumeGroupedCaption(777, now.Add(2*time.Second)); ok {
+		t.Fatal("ConsumeGroupedCaption() ok = true after consume, want false")
+	}
+}
+
+func TestStateMachineGroupedCaptionExpiresByTTL(t *testing.T) {
+	sm := NewStateMachine()
+	now := time.Unix(4000, 0)
+
+	sm.RememberGroupedCaption(888, "stale caption", 11, now)
+
+	if got, ok := sm.ConsumeGroupedCaption(888, now.Add(groupedCaptionTTL+time.Nanosecond)); ok || got != "" {
+		t.Fatalf("ConsumeGroupedCaption() = (%q, %v), want (\"\", false)", got, ok)
 	}
 }

@@ -107,6 +107,7 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 	}
 
 	text := m.Text()
+	h.rememberGroupedCaption(m, text)
 	log.Printf("[%s] Received message: %s...", h.Name(), utils.Truncate(text, 50))
 
 	if strings.Contains(strings.ToLower(text), PatternLikedYou) {
@@ -692,9 +693,7 @@ func (h *Handler) Start() {
 func (h *Handler) Bootstrap() error {
 	return h.bootstrapWithActions(func() error {
 		return h.sendBootstrapCommand("/start")
-	}, func() error {
-		return h.clickButton(ButtonViewProfiles)
-	})
+	}, nil)
 }
 
 func (h *Handler) bootstrapWithActions(sendStart func() error, startSearch func() error) error {
@@ -703,16 +702,34 @@ func (h *Handler) bootstrapWithActions(sendStart func() error, startSearch func(
 		return nil
 	}
 
-	log.Printf("[%s] Startup bootstrap: sending /start then %s", h.Name(), ButtonViewProfiles)
-
-	startErr := sendStart()
-	if startErr != nil {
-		log.Printf("[%s] Startup bootstrap: /start failed: %v", h.Name(), startErr)
+	if startSearch != nil {
+		log.Printf("[%s] Startup bootstrap: sending /start then %s", h.Name(), ButtonViewProfiles)
+	} else {
+		log.Printf("[%s] Startup bootstrap: sending /start and waiting for menu recovery", h.Name())
 	}
 
-	searchErr := startSearch()
-	if searchErr != nil {
-		log.Printf("[%s] Startup bootstrap: %s failed: %v", h.Name(), ButtonViewProfiles, searchErr)
+	var startErr error
+	if sendStart != nil {
+		startErr = sendStart()
+		if startErr != nil {
+			log.Printf("[%s] Startup bootstrap: /start failed: %v", h.Name(), startErr)
+		}
+	}
+
+	var searchErr error
+	if startSearch != nil {
+		searchErr = startSearch()
+		if searchErr != nil {
+			log.Printf("[%s] Startup bootstrap: %s failed: %v", h.Name(), ButtonViewProfiles, searchErr)
+		}
+	}
+
+	if startSearch == nil {
+		if startErr != nil {
+			return fmt.Errorf("startup bootstrap errors: send /start: %v", startErr)
+		}
+		log.Printf("[%s] Startup bootstrap completed", h.Name())
+		return nil
 	}
 
 	if startErr != nil || searchErr != nil {
@@ -781,9 +798,13 @@ func (h *Handler) HandleAlbum(a *telegram.Album) error {
 func (h *Handler) handleAlbumJob(ctx context.Context, a *telegram.Album) error {
 	h.cacheBotPeerFromAlbum(a)
 
-	profileText := profileTextFromAlbumMessages(a.Messages)
+	profileText := h.resolveAlbumProfileText(a)
 
-	if h.isLowQuality(profileText) {
+	if strings.TrimSpace(profileText) == "" {
+		log.Printf("[%s] Album text is empty after caption resolution, continuing with photos only", h.Name())
+	}
+
+	if strings.TrimSpace(profileText) != "" && h.isLowQuality(profileText) {
 		log.Printf("[%s] Skipping low quality album profile (len=%d): %s...",
 			h.Name(), utf8.RuneCountInString(profileText), utils.Truncate(profileText, 20))
 		if !h.state.SetStateIfNotStopped(StateViewingProfiles) {
@@ -853,6 +874,7 @@ func (h *Handler) StartWorker() {
 			case <-workerCtx.Done():
 				return
 			case job := <-queue:
+				h.state.OnJobDequeued(job.Type)
 				if shouldStopWorker(workerCtx, quit) || h.state.IsStopped() {
 					return
 				}
@@ -895,6 +917,19 @@ func waitForDelayOrStop(delay time.Duration, ctx context.Context, quit <-chan st
 	case <-timer.C:
 		return true
 	}
+}
+
+func (h *Handler) rememberGroupedCaption(m *telegram.NewMessage, text string) {
+	if m == nil || m.Message == nil || m.Message.GroupedID == 0 {
+		return
+	}
+
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return
+	}
+
+	h.state.RememberGroupedCaption(m.Message.GroupedID, trimmed, m.ID, time.Now())
 }
 
 func shouldStopWorker(ctx context.Context, quit <-chan struct{}) bool {
@@ -1040,6 +1075,27 @@ func firstAlbumMessageID(a *telegram.Album) int32 {
 	return first
 }
 
+func firstAlbumGroupedID(a *telegram.Album) int64 {
+	if a == nil {
+		return 0
+	}
+
+	var groupedID int64
+	var firstMessageID int32
+	for _, msg := range a.Messages {
+		if msg == nil || msg.Message == nil || msg.Message.GroupedID == 0 {
+			continue
+		}
+
+		if groupedID == 0 || (msg.ID > 0 && (firstMessageID == 0 || msg.ID < firstMessageID)) {
+			groupedID = msg.Message.GroupedID
+			firstMessageID = msg.ID
+		}
+	}
+
+	return groupedID
+}
+
 func profileTextFromAlbumMessages(messages []*telegram.NewMessage) string {
 	msg := selectAlbumTextSourceMessage(messages)
 	if msg == nil {
@@ -1164,6 +1220,23 @@ func (h *Handler) downloadAlbumData(ctx context.Context, a *telegram.Album, prof
 	}
 
 	return data, cleanup
+}
+
+func (h *Handler) resolveAlbumProfileText(a *telegram.Album) string {
+	if a == nil {
+		return ""
+	}
+
+	profileText := profileTextFromAlbumMessages(a.Messages)
+	if strings.TrimSpace(profileText) != "" {
+		return profileText
+	}
+
+	if groupedText, ok := h.state.ConsumeGroupedCaption(firstAlbumGroupedID(a), time.Now()); ok {
+		return groupedText
+	}
+
+	return ""
 }
 
 func (h *Handler) isLowQuality(text string) bool {
