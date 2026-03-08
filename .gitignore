@@ -1,0 +1,71 @@
+# Environment files - sensitive credentials
+.env
+.env.local
+.env.*.local
+.envrc
+*.env
+!env.example
+
+# Session data - Telegram sessions contain auth keys
+session.dat
+*.dat
+*.session
+*.session-journal
+data/
+sessions/
+
+# Telegram auth artifacts
+*auth*
+!internal/
+!pkg/
+!*.go
+
+# Build artifacts
+/tg-dating-agent
+/tg-dating-agent.exe
+*.exe
+*.dll
+*.so
+*.dylib
+/bin/
+/build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+*.mp3
+*.ogg
+*.mp4
+*.webm
+
+# Logs
+*.log
+logs/
+
+# Serena
+.serena
+
+# Profile
+.profile
+
+# Secret scanning artifacts
+.gitleaks-report.json
+
+# Test coverage
+*.out
+coverage.html
+coverage.txt
