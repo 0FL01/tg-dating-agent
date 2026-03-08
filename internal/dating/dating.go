@@ -135,7 +135,24 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 		return nil
 	}
 
+	// Detect "Your profile" message - next photo will be own profile, skip it
+	lowerText := strings.ToLower(text)
+	if strings.Contains(lowerText, PatternYourProfile) || strings.Contains(lowerText, PatternYourProfileRU) {
+		log.Printf("[%s] Detected 'Your profile' message, will skip next profile photo", h.Name())
+		h.state.SetSkipNextProfile(true)
+		return nil
+	}
+
 	if m.Photo() != nil || m.IsMedia() {
+		// Check if this is our own profile that should be skipped
+		if h.state.ConsumeSkipNextProfile() {
+			log.Printf("[%s] Skipping own profile photo", h.Name())
+			// Continue to actual profiles by clicking "View profiles"
+			if !h.state.Enqueue(ProfileJob{Type: "menu_recovery", Message: m}) {
+				log.Printf("[%s] Queue full, skipping view profiles after own profile", h.Name())
+			}
+			return nil
+		}
 		if !h.state.Enqueue(ProfileJob{Type: "message", Message: m}) {
 			log.Printf("[%s] Queue full, skipping profile", h.Name())
 		}
@@ -634,6 +651,16 @@ func (h *Handler) HandleAlbum(a *telegram.Album) error {
 	}
 
 	if h.isPaused() {
+		return nil
+	}
+
+	// Check if this is our own profile that should be skipped
+	if h.state.ConsumeSkipNextProfile() {
+		log.Printf("[%s] Skipping own profile album", h.Name())
+		// Continue to actual profiles by clicking "View profiles"
+		if !h.state.Enqueue(ProfileJob{Type: "menu_recovery", Message: nil}) {
+			log.Printf("[%s] Queue full, skipping view profiles after own profile album", h.Name())
+		}
 		return nil
 	}
 

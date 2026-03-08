@@ -12,6 +12,8 @@ const (
 	PatternTooShort        = "message is too short"
 	PatternDailyLimitExact = "Too many ❤️ today.\n\nInvite friends to get more ❤️!\n\nShare it with your friends/on your social media!\nYour personal link👇"
 	PatternTooManyLikes    = "too many"
+	PatternYourProfile     = "your profile" // English pattern
+	PatternYourProfileRU   = "твой профиль" // Russian pattern
 )
 
 const (

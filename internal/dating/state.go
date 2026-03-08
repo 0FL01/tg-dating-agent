@@ -44,12 +44,13 @@ type ProfileJob struct {
 }
 
 type StateMachine struct {
-	mu             sync.RWMutex
-	state          State
-	pendingMessage string
-	retryCount     int
-	profileData    *ProfileData
-	pausedUntil    time.Time
+	mu              sync.RWMutex
+	state           State
+	pendingMessage  string
+	retryCount      int
+	profileData     *ProfileData
+	pausedUntil     time.Time
+	skipNextProfile bool // flag to skip own profile after "Your profile" message
 	// New fields for worker pool pattern:
 	profileQueue chan ProfileJob // buffered channel for profile queue
 	quitChan     chan struct{}   // for graceful shutdown
@@ -73,6 +74,12 @@ func (sm *StateMachine) SetState(state State) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.state = state
+
+	// Reset skip flag when stopping or going idle
+	// (profiles won't be processed in these states anyway)
+	if state == StateStopped || state == StateIdle {
+		sm.skipNextProfile = false
+	}
 }
 
 func (sm *StateMachine) GetPendingMessage() string {
@@ -197,4 +204,29 @@ func (sm *StateMachine) CheckPause(now time.Time) (paused bool, resumed bool, un
 
 	sm.pausedUntil = time.Time{}
 	return false, true, time.Time{}
+}
+
+// ShouldSkipNextProfile returns true if the next profile should be skipped
+// (used to skip own profile after "Your profile" message)
+func (sm *StateMachine) ShouldSkipNextProfile() bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.skipNextProfile
+}
+
+// SetSkipNextProfile sets the flag to skip the next profile
+func (sm *StateMachine) SetSkipNextProfile(skip bool) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.skipNextProfile = skip
+}
+
+// ConsumeSkipNextProfile checks if we should skip, and clears the flag
+// Returns true if the current profile should be skipped
+func (sm *StateMachine) ConsumeSkipNextProfile() bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	shouldSkip := sm.skipNextProfile
+	sm.skipNextProfile = false
+	return shouldSkip
 }
