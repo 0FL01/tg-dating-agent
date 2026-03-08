@@ -53,20 +53,22 @@ type StateMachine struct {
 	pausedUntil    time.Time
 	ownProfileSkip ownProfileSkipContext
 	// New fields for worker pool pattern:
-	profileQueue    chan ProfileJob // buffered channel for profile queue
-	quitChan        chan struct{}   // for graceful shutdown
-	workerDone      chan struct{}
-	workerActive    bool
-	acceptingWork   bool
-	workerCtx       context.Context
-	workerCancel    context.CancelFunc
-	recoveryQueued  map[string]bool
-	groupedCaptions map[int64]groupedCaptionContext
+	profileQueue          chan ProfileJob // buffered channel for profile queue
+	quitChan              chan struct{}   // for graceful shutdown
+	workerDone            chan struct{}
+	workerActive          bool
+	acceptingWork         bool
+	workerCtx             context.Context
+	workerCancel          context.CancelFunc
+	recoveryQueued        map[string]bool
+	groupedCaptions       map[int64]groupedCaptionContext
+	startupOwnProfileSkip startupOwnProfileSkipContext
 }
 
 const ownProfileSkipTTL = 45 * time.Second
 const ownProfileSkipMaxMessageGap int32 = 3
 const groupedCaptionTTL = 2 * time.Minute
+const startupOwnProfileSkipTTL = 90 * time.Second
 
 type ownProfileSkipContext struct {
 	markerMessageID int32
@@ -78,6 +80,11 @@ type groupedCaptionContext struct {
 	text      string
 	messageID int32
 	setAt     time.Time
+}
+
+type startupOwnProfileSkipContext struct {
+	setAt  time.Time
+	active bool
 }
 
 func NewStateMachine() *StateMachine {
@@ -113,6 +120,7 @@ func (sm *StateMachine) SetState(state State) {
 	// (profiles won't be processed in these states anyway)
 	if state == StateStopped || state == StateIdle {
 		sm.ownProfileSkip = ownProfileSkipContext{}
+		sm.startupOwnProfileSkip = startupOwnProfileSkipContext{}
 	}
 }
 
@@ -128,6 +136,7 @@ func (sm *StateMachine) SetStateIfNotStopped(state State) bool {
 
 	if state == StateIdle {
 		sm.ownProfileSkip = ownProfileSkipContext{}
+		sm.startupOwnProfileSkip = startupOwnProfileSkipContext{}
 	}
 
 	return true
@@ -214,6 +223,7 @@ func (sm *StateMachine) BeginShutdown() {
 	sm.acceptingWork = false
 	sm.ownProfileSkip = ownProfileSkipContext{}
 	sm.groupedCaptions = make(map[int64]groupedCaptionContext)
+	sm.startupOwnProfileSkip = startupOwnProfileSkipContext{}
 }
 
 // GetQueue returns the receive-only channel for the profile queue
@@ -401,6 +411,37 @@ func (sm *StateMachine) MarkOwnProfileSkip(markerMessageID int32, now time.Time)
 		setAt:           now,
 		active:          true,
 	}
+}
+
+func (sm *StateMachine) ArmStartupOwnProfileSkip(now time.Time) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.startupOwnProfileSkip = startupOwnProfileSkipContext{
+		setAt:  now,
+		active: true,
+	}
+}
+
+func (sm *StateMachine) ConsumeStartupOwnProfileSkip(now time.Time) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if !sm.startupOwnProfileSkip.active {
+		return false
+	}
+	if now.Sub(sm.startupOwnProfileSkip.setAt) > startupOwnProfileSkipTTL {
+		sm.startupOwnProfileSkip = startupOwnProfileSkipContext{}
+		return false
+	}
+
+	sm.startupOwnProfileSkip = startupOwnProfileSkipContext{}
+	return true
+}
+
+func (sm *StateMachine) ClearStartupOwnProfileSkip() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.startupOwnProfileSkip = startupOwnProfileSkipContext{}
 }
 
 func (sm *StateMachine) ConsumeOwnProfileSkip(candidateMessageID int32, now time.Time) bool {

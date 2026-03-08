@@ -194,3 +194,40 @@ func TestStateMachineGroupedCaptionExpiresByTTL(t *testing.T) {
 		t.Fatalf("ConsumeGroupedCaption() = (%q, %v), want (\"\", false)", got, ok)
 	}
 }
+
+func TestStateMachineStartupOwnProfileSkipConsumeLifecycle(t *testing.T) {
+	sm := NewStateMachine()
+	now := time.Unix(5000, 0)
+
+	sm.ArmStartupOwnProfileSkip(now)
+
+	if got := sm.ConsumeStartupOwnProfileSkip(now.Add(time.Second)); !got {
+		t.Fatal("ConsumeStartupOwnProfileSkip() = false, want true")
+	}
+
+	if got := sm.ConsumeStartupOwnProfileSkip(now.Add(2 * time.Second)); got {
+		t.Fatal("ConsumeStartupOwnProfileSkip() = true after consume, want false")
+	}
+}
+
+func TestStateMachineStartupOwnProfileSkipExpiresByTTL(t *testing.T) {
+	sm := NewStateMachine()
+	now := time.Unix(6000, 0)
+
+	sm.ArmStartupOwnProfileSkip(now)
+
+	if got := sm.ConsumeStartupOwnProfileSkip(now.Add(startupOwnProfileSkipTTL + time.Nanosecond)); got {
+		t.Fatal("ConsumeStartupOwnProfileSkip() = true after TTL, want false")
+	}
+}
+
+func TestStateMachineStartupOwnProfileSkipClearedExplicitly(t *testing.T) {
+	sm := NewStateMachine()
+
+	sm.ArmStartupOwnProfileSkip(time.Now())
+	sm.ClearStartupOwnProfileSkip()
+
+	if got := sm.ConsumeStartupOwnProfileSkip(time.Now()); got {
+		t.Fatal("ConsumeStartupOwnProfileSkip() = true after Clear, want false")
+	}
+}

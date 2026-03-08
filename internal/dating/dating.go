@@ -141,6 +141,7 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 	}
 
 	if strings.Contains(text, PatternViewProfiles) {
+		h.state.ClearStartupOwnProfileSkip()
 		log.Printf("[%s] Detected main menu, enqueuing profile viewing", h.Name())
 		if !h.state.Enqueue(ProfileJob{Type: "menu_recovery", Message: m}) {
 			log.Printf("[%s] Queue full, skipping main menu recovery", h.Name())
@@ -158,6 +159,11 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 
 	if m.Photo() != nil || m.IsMedia() {
 		if m.Message != nil && m.Message.GroupedID != 0 {
+			return nil
+		}
+
+		if h.state.ConsumeStartupOwnProfileSkip(time.Now()) {
+			log.Printf("[%s] Skipping startup own profile photo (markerless fallback)", h.Name())
 			return nil
 		}
 
@@ -762,6 +768,9 @@ func (h *Handler) sendBootstrapCommand(command string) error {
 	if err != nil {
 		return fmt.Errorf("failed to send bootstrap command %q: %w", command, err)
 	}
+	if command == "/start" {
+		h.state.ArmStartupOwnProfileSkip(time.Now())
+	}
 
 	return nil
 }
@@ -774,6 +783,11 @@ func (h *Handler) HandleAlbum(a *telegram.Album) error {
 	}
 
 	if h.isPaused() {
+		return nil
+	}
+
+	if h.state.ConsumeStartupOwnProfileSkip(time.Now()) {
+		log.Printf("[%s] Skipping startup own profile album (markerless fallback)", h.Name())
 		return nil
 	}
 

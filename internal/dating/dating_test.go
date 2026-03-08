@@ -322,6 +322,57 @@ func TestHandleNonGroupedMediaStillEnqueuesMessageJob(t *testing.T) {
 	}
 }
 
+func TestHandleSkipsStartupOwnProfileWithoutMarkerThenRecoversFromMenu(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.ArmStartupOwnProfileSkip(time.Now())
+
+	ownProfileMedia := &telegram.NewMessage{ID: 500, Message: &telegram.MessageObj{
+		Message: "self profile text",
+		Media:   &telegram.MessageMediaPhoto{},
+		PeerID:  &telegram.PeerUser{UserID: h.chatID},
+	}}
+	if err := h.Handle(ownProfileMedia); err != nil {
+		t.Fatalf("Handle(ownProfileMedia) error = %v", err)
+	}
+	mustQueueEmpty(t, h.state)
+
+	mainMenu := &telegram.NewMessage{ID: 501, Message: &telegram.MessageObj{
+		Message: "1. View profiles.\n2. Edit my profile.",
+		PeerID:  &telegram.PeerUser{UserID: h.chatID},
+	}}
+	if err := h.Handle(mainMenu); err != nil {
+		t.Fatalf("Handle(mainMenu) error = %v", err)
+	}
+
+	job := mustDequeueJob(t, h.state)
+	if job.Type != "menu_recovery" {
+		t.Fatalf("queued job type = %q, want %q", job.Type, "menu_recovery")
+	}
+}
+
+func TestHandleAlbumSkipsStartupOwnProfileWithoutMarker(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.ArmStartupOwnProfileSkip(time.Now())
+
+	album := &telegram.Album{
+		Messages: []*telegram.NewMessage{
+			{
+				ID: 600,
+				Message: &telegram.MessageObj{
+					Media:  &telegram.MessageMediaPhoto{},
+					PeerID: &telegram.PeerUser{UserID: h.chatID},
+				},
+			},
+		},
+	}
+
+	if err := h.HandleAlbum(album); err != nil {
+		t.Fatalf("HandleAlbum() error = %v", err)
+	}
+
+	mustQueueEmpty(t, h.state)
+}
+
 func TestResolveAlbumProfileTextFallsBackToGroupedCaption(t *testing.T) {
 	h := &Handler{state: NewStateMachine()}
 	h.state.RememberGroupedCaption(991, "caption from grouped message", 41, time.Now())
