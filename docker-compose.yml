@@ -1,0 +1,27 @@
+services:
+  dating-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tg-dating-agent
+    env_file:
+      - .env
+    environment:
+      # Override SESSION_PATH to use the persistent volume location
+      # Only used if TG_STRING_SESSION is not set
+      - SESSION_PATH=/app/data/session.dat
+    volumes:
+      # Persistent volume for session file (fallback method)
+      # Not needed if using TG_STRING_SESSION (preferred for Docker)
+      - dating-session:/app/data
+    restart: unless-stopped
+    # No ports needed - userbot connects outbound to Telegram
+    # Read-only root filesystem for additional security
+    read_only: true
+    # Temporary filesystem for any write operations
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+
+volumes:
+  dating-session:
+    driver: local
