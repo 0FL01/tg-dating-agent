@@ -25,18 +25,21 @@ var mimeTypes = map[string]string{
 }
 
 type Client struct {
-	client *openrouter.Client
+	client               *openrouter.Client
+	createChatCompletion func(context.Context, openrouter.ChatCompletionRequest) (openrouter.ChatCompletionResponse, error)
 }
 
 var _ MultimodalSummarizer = (*Client)(nil)
 
 func NewClient(apiKey string) *Client {
+	openRouterClient := openrouter.NewClient(apiKey)
 	return &Client{
-		client: openrouter.NewClient(apiKey),
+		client:               openRouterClient,
+		createChatCompletion: openRouterClient.CreateChatCompletion,
 	}
 }
 
-func (c *Client) SummarizeMultimodal(model, systemPrompt string, content MultimodalContent, temperature float64) (string, error) {
+func (c *Client) SummarizeMultimodal(ctx context.Context, model, systemPrompt string, content MultimodalContent, temperature float64) (string, error) {
 	parts, err := c.buildMultimodalParts(content, systemPrompt)
 	if err != nil {
 		return "", err
@@ -56,17 +59,25 @@ func (c *Client) SummarizeMultimodal(model, systemPrompt string, content Multimo
 		},
 	}
 
-	return c.createCompletion(context.Background(), model, messages, temperature)
+	return c.createCompletion(ctx, model, messages, temperature)
 }
 
 func (c *Client) createCompletion(ctx context.Context, model string, messages []openrouter.ChatCompletionMessage, temperature float64) (string, error) {
+	createChatCompletion := c.createChatCompletion
+	if createChatCompletion == nil {
+		if c.client == nil {
+			return "", errors.New("openrouter client is not configured")
+		}
+		createChatCompletion = c.client.CreateChatCompletion
+	}
+
 	opts := tghelper.DefaultRetryOptions()
 	opts.OnRetry = func(attempt int, err error, delay time.Duration) {
 		log.Printf("[openrouter] retry %d: %v (sleep %s)", attempt, err, delay)
 	}
 
 	return tghelper.DoRetry(ctx, func(ctx context.Context) (string, error) {
-		resp, err := c.client.CreateChatCompletion(ctx, openrouter.ChatCompletionRequest{
+		resp, err := createChatCompletion(ctx, openrouter.ChatCompletionRequest{
 			Model:       model,
 			Messages:    messages,
 			Temperature: float32(temperature),

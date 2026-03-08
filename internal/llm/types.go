@@ -1,5 +1,7 @@
 package llm
 
+import "context"
+
 // MultimodalContent describes input data for multimodal summarization.
 type MultimodalContent struct {
 	Text       string   // Text content
@@ -11,5 +13,5 @@ type MultimodalContent struct {
 // MultimodalSummarizer is an interface for multimodal content summarization.
 type MultimodalSummarizer interface {
 	// SummarizeMultimodal creates a summary of multimodal content.
-	SummarizeMultimodal(model, systemPrompt string, content MultimodalContent, temperature float64) (string, error)
+	SummarizeMultimodal(ctx context.Context, model, systemPrompt string, content MultimodalContent, temperature float64) (string, error)
 }
