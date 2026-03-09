@@ -16,7 +16,8 @@ The default branch is `main`.
 <root>/
 ├── cmd/
 │   └── dating/
-│       └── main.go              # Entry point: setup, auth, event handlers
+│       ├── main.go              # Entry point: setup, auth, event handlers
+│       └── main_test.go         # Tests for main orchestration logic
 ├── internal/
 │   ├── dating/
 │   │   ├── dating.go            # Core logic: worker pool, profile processing, message generation, retry flow
@@ -24,10 +25,14 @@ The default branch is `main`.
 │   │   ├── messages.go          # Constants: button texts, patterns, retry prompts
 │   │   ├── markup.go            # Reply markup helpers for button detection
 │   │   ├── bootstrap.go         # Standalone handler wiring for external entrypoints
-│   │   └── *_test.go            # Unit tests
+│   │   ├── dating_test.go       # Tests for dating logic
+│   │   ├── state_test.go        # Tests for state machine
+│   │   ├── markup_test.go       # Tests for markup helpers
+│   │   └── bootstrap_test.go    # Tests for bootstrap logic
 │   ├── llm/
 │   │   ├── client.go            # OpenRouter API client with multimodal support
-│   │   └── types.go             # Interfaces and content types
+│   │   ├── types.go             # Interfaces and content types
+│   │   └── client_test.go       # Tests for LLM client
 │   ├── standalone/
 │   │   ├── config.go            # Environment config loading with defaults
 │   │   ├── auth.go              # Telegram auth and session management
@@ -45,7 +50,7 @@ The default branch is `main`.
 └── env.example                  # Environment variables template
 
 ### Key Modules
-- **dating**: Profile queue (buffer 50), worker goroutine, MBTI filtering, message generation workflow, retry logic, button detection; own-profile skip via correlated context (message-id + TTL); deterministic album text binding (photo caption preference, message ID ordering)
+- **dating**: Profile queue (buffer 50), worker goroutine, MBTI filtering, message generation workflow, retry logic, button detection; own-profile skip via correlated context (message-id + TTL) and startup fallback (90s TTL); recovery jobs (menu_recovery, stuck_recovery) with deduplication; deterministic album text binding (photo caption preference, message ID ordering)
 - **llm**: OpenRouter integration with image+text multimodal support
 - **standalone**: Configuration, authentication, and bootstrap wiring
 - **tghelper**: Resilient Telegram API operations with retry logic, exponential backoff, jitter
@@ -54,7 +59,7 @@ The default branch is `main`.
 
 ### 1. Patterns
 - **Worker Pool Pattern**: Profile queue (chan ProfileJob, buffer 50) with dedicated worker goroutine for sequential processing; handlers enqueue jobs; graceful shutdown via quitChan
-- **State Machine**: `StateMachine` tracks conversation state (idle, viewing, paused, stopped); owns own-profile skip context under mutex with correlation by message ID window and TTL
+- **State Machine**: `StateMachine` tracks conversation state (idle, viewing, paused, stopped); owns own-profile skip context under mutex with correlation by message ID window and TTL (45s TTL, max gap 3 messages), startup fallback (90s TTL), grouped caption context (2min TTL)
 - **Retry Pattern**: All external calls use `tghelper.RetryTelegram` with exponential backoff and jitter; message retry handles too long/too short scenarios
 - **Multimodal LLM**: Profiles processed with photos + text for MBTI analysis and message generation
 - **Cleanup Pattern**: Deferred cleanup for temporary photo downloads
@@ -91,7 +96,8 @@ States: `idle` → `enqueue` (add to queue) → `viewing_profiles` → `waiting_
 - `DATING_BOT_CHAT_ID` - Dating bot chat ID (default: 1234060895)
 - `DATING_MODEL` - Model for dating requests (default: google/gemini-2.5-flash-lite-preview-06-2025)
 - `DATING_MBTI_ALLOWLIST` - MBTI filter (comma-separated, default: INTJ,INFJ,ENTJ,ENFJ)
-- `DATING_ACTION_DELAY` - Anti-spam delay between actions (default: 3s)
+- `DATING_ACTION_DELAY` - Anti-spam delay between actions (default: 15s)
+- `DATING_JITTER_DELAY` - Random jitter added to action delay (default: 5s)
 - `DATING_SKIP_LOW_QUALITY` - Filter short bios (default: false)
 - `DATING_MIN_BIO_LENGTH` - Minimum bio length for low-quality filtering (default: 50)
 - `DATING_TEMPERATURE` - LLM temperature parameter (default: 0.7)
