@@ -9,6 +9,8 @@ services:
     volumes:
       # Session file - gogram writes here even with TG_STRING_SESSION
       - ./session.dat:/app/session.dat
+      # Reply audit logs
+      - ./logs:/app/logs
     restart: unless-stopped
     # No ports needed - userbot connects outbound to Telegram
     # Read-only root filesystem for additional security

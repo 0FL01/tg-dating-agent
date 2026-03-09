@@ -56,10 +56,15 @@ type replyAuditAppender interface {
 // NewHandler creates a new dating handler
 func NewHandler(cfg *standalone.Config, client llm.MultimodalSummarizer, tgClient *telegram.Client) *Handler {
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+	var replyAudit replyAuditAppender
+	if cfg != nil {
+		replyAudit = newReplyAuditAppender(cfg.DatingReplyAuditLogPath)
+	}
 
 	return &Handler{
 		config:          cfg,
 		client:          client,
+		replyAudit:      replyAudit,
 		tgClient:        tgClient,
 		state:           NewStateMachine(),
 		chatID:          cfg.DatingBotChatID,
@@ -72,6 +77,30 @@ func NewHandler(cfg *standalone.Config, client llm.MultimodalSummarizer, tgClien
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
 	}
+}
+
+func newReplyAuditAppender(path string) replyAuditAppender {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+
+	logger := NewReplyAuditLogger(path)
+	if err := logger.ensureDir(); err != nil {
+		log.Printf("[dating] Reply audit disabled: %v", err)
+		return nil
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		log.Printf("[dating] Reply audit disabled: open log path %q: %v", path, err)
+		return nil
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("[dating] Reply audit disabled: close log path %q: %v", path, err)
+		return nil
+	}
+
+	return logger
 }
 
 // Name returns the handler name for logging

@@ -100,6 +100,7 @@ States: `idle` → `enqueue` (add to queue) → `viewing_profiles` → `waiting_
 - `DATING_JITTER_DELAY` - Random jitter added to action delay (default: 5s)
 - `DATING_SKIP_LOW_QUALITY` - Filter short bios (default: false)
 - `DATING_MIN_BIO_LENGTH` - Minimum bio length for low-quality filtering (default: 50)
+- `DATING_REPLY_AUDIT_LOG_PATH` - Reply audit JSONL path (default: /app/logs/replies.jsonl; empty disables)
 - `DATING_TEMPERATURE` - LLM temperature parameter (default: 0.7)
 - `DATING_PROMPT` - Custom prompt for message generation
 - `DATING_MBTI_PROMPT` - Custom prompt for MBTI analysis

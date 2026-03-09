@@ -152,6 +152,9 @@ func TestLoadDatingDefaults(t *testing.T) {
 	if cfg.DatingMinBioLength != DefaultDatingMinBioLength {
 		t.Errorf("DatingMinBioLength = %d, want %d", cfg.DatingMinBioLength, DefaultDatingMinBioLength)
 	}
+	if cfg.DatingReplyAuditLogPath != DefaultDatingReplyAuditLogPath {
+		t.Errorf("DatingReplyAuditLogPath = %q, want %q", cfg.DatingReplyAuditLogPath, DefaultDatingReplyAuditLogPath)
+	}
 	if cfg.DatingSkipLowQuality != false {
 		t.Errorf("DatingSkipLowQuality = %v, want false", cfg.DatingSkipLowQuality)
 	}
@@ -171,6 +174,7 @@ func TestLoadDatingCustomValues(t *testing.T) {
 	t.Setenv("DATING_TEMPERATURE", "0.9")
 	t.Setenv("DATING_SKIP_LOW_QUALITY", "true")
 	t.Setenv("DATING_MIN_BIO_LENGTH", "100")
+	t.Setenv("DATING_REPLY_AUDIT_LOG_PATH", "/tmp/replies-custom.jsonl")
 
 	cfg, err := Load()
 	if err != nil {
@@ -207,6 +211,23 @@ func TestLoadDatingCustomValues(t *testing.T) {
 	}
 	if cfg.DatingMinBioLength != 100 {
 		t.Errorf("DatingMinBioLength = %d, want 100", cfg.DatingMinBioLength)
+	}
+	if cfg.DatingReplyAuditLogPath != "/tmp/replies-custom.jsonl" {
+		t.Errorf("DatingReplyAuditLogPath = %q, want %q", cfg.DatingReplyAuditLogPath, "/tmp/replies-custom.jsonl")
+	}
+}
+
+func TestLoadDatingReplyAuditLogPathExplicitEmpty(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("DATING_REPLY_AUDIT_LOG_PATH", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.DatingReplyAuditLogPath != "" {
+		t.Errorf("DatingReplyAuditLogPath = %q, want empty string", cfg.DatingReplyAuditLogPath)
 	}
 }
 
