@@ -29,6 +29,7 @@ var jitterRand = rand.New(rand.NewSource(time.Now().UnixNano()))
 type Handler struct {
 	config          *standalone.Config
 	client          llm.MultimodalSummarizer
+	replyAudit      replyAuditAppender
 	tgClient        *telegram.Client
 	state           *StateMachine
 	chatID          int64
@@ -46,6 +47,10 @@ type Handler struct {
 	lifecycleCtx    context.Context
 	lifecycleCancel context.CancelFunc
 	stopSleepOnce   sync.Once
+}
+
+type replyAuditAppender interface {
+	Append(mbti, prompt, response string) error
 }
 
 // NewHandler creates a new dating handler
@@ -318,6 +323,7 @@ func (h *Handler) generateAndSendLike(ctx context.Context, data ProfileData) err
 		return nil
 	}
 
+	data.MBTI = mbti
 	h.state.SetProfileData(&data)
 	h.state.ResetRetry()
 
@@ -326,6 +332,7 @@ func (h *Handler) generateAndSendLike(ctx context.Context, data ProfileData) err
 		log.Printf("[%s] Failed to generate message: %v", h.Name(), err)
 		return h.clickButtonWithContext(ctx, ButtonDislike)
 	}
+	h.appendReplyAudit(mbti, h.prompt, generatedMsg)
 
 	log.Printf("[%s] Generated message: %s", h.Name(), utils.Truncate(generatedMsg, 100))
 	if shouldStopWorker(ctx, h.state.ShouldQuit()) || h.state.IsStopped() {
@@ -556,6 +563,7 @@ func (h *Handler) retryGenerateMessage(ctx context.Context, retryType RetryType)
 		log.Printf("[%s] Failed to regenerate message: %v, using fallback", h.Name(), err)
 		return h.handleMaxRetriesReached(ctx, retryType, pendingMsg)
 	}
+	h.appendReplyAudit(profileData.MBTI, retryPrompt, generatedMsg)
 
 	log.Printf("[%s] Regenerated message (attempt %d): %s", h.Name(), retryCount, utils.Truncate(generatedMsg, 100))
 	if h.shouldStopProcessing(ctx) {
@@ -648,6 +656,16 @@ func truncateMessage(msg string, maxLen int) string {
 	}
 
 	return string(truncatedRunes)
+}
+
+func (h *Handler) appendReplyAudit(mbti, prompt, response string) {
+	if h.replyAudit == nil {
+		return
+	}
+
+	if err := h.replyAudit.Append(mbti, prompt, response); err != nil {
+		log.Printf("[%s] Reply audit append failed: %v", h.Name(), err)
+	}
 }
 
 func (h *Handler) clickButton(buttonText string) error {

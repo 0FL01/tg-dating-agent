@@ -35,6 +35,7 @@ func (s State) String() string {
 type ProfileData struct {
 	PhotoPaths  []string
 	ProfileText string
+	MBTI        string
 }
 
 // ProfileJob represents a job to process a profile from the queue

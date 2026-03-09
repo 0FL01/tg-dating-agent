@@ -25,6 +25,64 @@ type blockingSummarizer struct {
 	release      chan struct{}
 }
 
+type scriptedSummarizer struct {
+	mu           sync.Mutex
+	responses    []string
+	prompts      []string
+	callCount    int
+	cancelOnCall int
+	cancel       context.CancelFunc
+}
+
+func (s *scriptedSummarizer) SummarizeMultimodal(_ context.Context, _ string, prompt string, _ llm.MultimodalContent, _ float64) (string, error) {
+	s.mu.Lock()
+	call := s.callCount + 1
+	s.callCount = call
+	s.prompts = append(s.prompts, prompt)
+	if call > len(s.responses) {
+		s.mu.Unlock()
+		return "", errors.New("unexpected summarize call")
+	}
+	response := s.responses[call-1]
+	shouldCancel := s.cancel != nil && s.cancelOnCall == call
+	s.mu.Unlock()
+
+	if shouldCancel {
+		s.cancel()
+	}
+
+	return response, nil
+}
+
+type auditCall struct {
+	mbti     string
+	prompt   string
+	response string
+}
+
+type stubReplyAuditLogger struct {
+	mu    sync.Mutex
+	calls []auditCall
+	err   error
+}
+
+func (s *stubReplyAuditLogger) Append(mbti, prompt, response string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.calls = append(s.calls, auditCall{mbti: mbti, prompt: prompt, response: response})
+	return s.err
+}
+
+func (s *stubReplyAuditLogger) snapshotCalls() []auditCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]auditCall, len(s.calls))
+	copy(out, s.calls)
+	return out
+}
+
 func (s *blockingSummarizer) SummarizeMultimodal(ctx context.Context, _ string, _ string, _ llm.MultimodalContent, _ float64) (string, error) {
 	s.startedOnce.Do(func() {
 		close(s.started)
@@ -863,6 +921,115 @@ func TestIsMBTIAllowed(t *testing.T) {
 				t.Fatalf("isMBTIAllowed(%q, %v) = %v, want %v", tt.mbti, tt.allowlist, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGenerateAndSendLikeAppendsReplyAudit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	summarizer := &scriptedSummarizer{
+		responses:    []string{"INTJ", "generated"},
+		cancelOnCall: 2,
+		cancel:       cancel,
+	}
+	audit := &stubReplyAuditLogger{}
+
+	h := &Handler{
+		state: NewStateMachine(),
+		config: &standalone.Config{
+			DatingMBTIPrompt:    "mbti prompt",
+			DatingMBTIAllowlist: []string{"INTJ"},
+		},
+		client:      summarizer,
+		model:       "model",
+		prompt:      "reply prompt",
+		temperature: 0.2,
+		replyAudit:  audit,
+	}
+
+	err := h.generateAndSendLike(ctx, ProfileData{ProfileText: "bio"})
+	if err != nil {
+		t.Fatalf("generateAndSendLike() error = %v, want nil", err)
+	}
+
+	calls := audit.snapshotCalls()
+	if len(calls) != 1 {
+		t.Fatalf("reply audit call count = %d, want 1", len(calls))
+	}
+
+	if calls[0].mbti != "INTJ" || calls[0].prompt != "reply prompt" || calls[0].response != "generated" {
+		t.Fatalf("reply audit call = %+v, want mbti=%q prompt=%q response=%q", calls[0], "INTJ", "reply prompt", "generated")
+	}
+}
+
+func TestGenerateAndSendLikeReplyAuditErrorDoesNotStopFlow(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	summarizer := &scriptedSummarizer{
+		responses:    []string{"INTJ", "generated"},
+		cancelOnCall: 2,
+		cancel:       cancel,
+	}
+	audit := &stubReplyAuditLogger{err: errors.New("append failed")}
+
+	h := &Handler{
+		state: NewStateMachine(),
+		config: &standalone.Config{
+			DatingMBTIPrompt:    "mbti prompt",
+			DatingMBTIAllowlist: []string{"INTJ"},
+		},
+		client:      summarizer,
+		model:       "model",
+		prompt:      "reply prompt",
+		temperature: 0.2,
+		replyAudit:  audit,
+	}
+
+	err := h.generateAndSendLike(ctx, ProfileData{ProfileText: "bio"})
+	if err != nil {
+		t.Fatalf("generateAndSendLike() error = %v, want nil", err)
+	}
+
+	if len(audit.snapshotCalls()) != 1 {
+		t.Fatalf("reply audit call count = %d, want 1", len(audit.snapshotCalls()))
+	}
+}
+
+func TestRetryGenerateMessageAppendsReplyAudit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	summarizer := &scriptedSummarizer{
+		responses:    []string{"retry generated"},
+		cancelOnCall: 1,
+		cancel:       cancel,
+	}
+	audit := &stubReplyAuditLogger{}
+
+	h := &Handler{
+		state:       NewStateMachine(),
+		client:      summarizer,
+		model:       "model",
+		temperature: 0.2,
+		replyAudit:  audit,
+	}
+	h.state.SetPendingMessage("draft")
+	h.state.SetProfileData(&ProfileData{ProfileText: "bio", MBTI: "INFJ"})
+
+	err := h.retryGenerateMessage(ctx, RetryTooShort)
+	if err != nil {
+		t.Fatalf("retryGenerateMessage() error = %v, want nil", err)
+	}
+
+	calls := audit.snapshotCalls()
+	if len(calls) != 1 {
+		t.Fatalf("reply audit call count = %d, want 1", len(calls))
+	}
+
+	if calls[0].mbti != "INFJ" || calls[0].prompt != TooShortRetryPrompt || calls[0].response != "retry generated" {
+		t.Fatalf("reply audit call = %+v, want mbti=%q prompt=%q response=%q", calls[0], "INFJ", TooShortRetryPrompt, "retry generated")
 	}
 }
 
