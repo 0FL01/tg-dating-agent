@@ -254,3 +254,82 @@ func TestStateMachineTryMarkProfileJobProcessingRejectsStaleAndDuplicate(t *test
 		t.Fatalf("TryMarkProfileJobProcessing(105 duplicate) accepted=true, want false (latest=%d last=%d)", latest, last)
 	}
 }
+
+func TestStateMachineProfileLLMCacheSetGet(t *testing.T) {
+	sm := NewStateMachine()
+
+	sm.SetProfileLLMCache("profile-1", "INTJ", "Hi")
+
+	mbti, opener, ok := sm.GetProfileLLMCache("profile-1")
+	if !ok {
+		t.Fatal("GetProfileLLMCache(profile-1) ok=false, want true")
+	}
+	if mbti != "INTJ" || opener != "Hi" {
+		t.Fatalf("GetProfileLLMCache(profile-1) = (%q, %q), want (%q, %q)", mbti, opener, "INTJ", "Hi")
+	}
+}
+
+func TestStateMachineProfileLLMCacheOverwriteKey(t *testing.T) {
+	sm := NewStateMachine()
+
+	sm.SetProfileLLMCache("profile-1", "INTJ", "Hi")
+	sm.SetProfileLLMCache("profile-1", "INFJ", "Hello")
+
+	mbti, opener, ok := sm.GetProfileLLMCache("profile-1")
+	if !ok {
+		t.Fatal("GetProfileLLMCache(profile-1) ok=false, want true")
+	}
+	if mbti != "INFJ" || opener != "Hello" {
+		t.Fatalf("GetProfileLLMCache(profile-1) = (%q, %q), want (%q, %q)", mbti, opener, "INFJ", "Hello")
+	}
+}
+
+func TestStateMachineProfileLLMCacheEvictsOldestAtLimit(t *testing.T) {
+	sm := NewStateMachine()
+	sm.profileLLMCacheMax = 2
+
+	sm.SetProfileLLMCache("profile-1", "INTJ", "one")
+	sm.SetProfileLLMCache("profile-2", "INFJ", "two")
+	sm.SetProfileLLMCache("profile-3", "ENTJ", "three")
+
+	if _, _, ok := sm.GetProfileLLMCache("profile-1"); ok {
+		t.Fatal("GetProfileLLMCache(profile-1) ok=true after overflow, want false")
+	}
+
+	if mbti, opener, ok := sm.GetProfileLLMCache("profile-2"); !ok || mbti != "INFJ" || opener != "two" {
+		t.Fatalf("GetProfileLLMCache(profile-2) = (%q, %q, %v), want (%q, %q, true)", mbti, opener, ok, "INFJ", "two")
+	}
+
+	if mbti, opener, ok := sm.GetProfileLLMCache("profile-3"); !ok || mbti != "ENTJ" || opener != "three" {
+		t.Fatalf("GetProfileLLMCache(profile-3) = (%q, %q, %v), want (%q, %q, true)", mbti, opener, ok, "ENTJ", "three")
+	}
+}
+
+func TestStateMachineProfileLLMCacheConcurrentReadWrite(t *testing.T) {
+	sm := NewStateMachine()
+
+	const workers = 16
+	const iterations = 200
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				key := "shared-profile"
+				if j%3 == 0 {
+					key = "profile-" + string(rune('a'+(workerID%4)))
+				}
+				sm.SetProfileLLMCache(key, "INTJ", "hello")
+				sm.GetProfileLLMCache(key)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	if _, _, ok := sm.GetProfileLLMCache("shared-profile"); !ok {
+		t.Fatal("GetProfileLLMCache(shared-profile) ok=false, want true")
+	}
+}

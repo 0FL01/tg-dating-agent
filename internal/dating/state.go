@@ -66,12 +66,21 @@ type StateMachine struct {
 	startupOwnProfileSkip startupOwnProfileSkipContext
 	latestProfileJobID    int32
 	lastProcessedJobID    int32
+	profileLLMCache       map[string]profileLLMCacheEntry
+	profileLLMCacheOrder  []string
+	profileLLMCacheMax    int
 }
 
 const ownProfileSkipTTL = 45 * time.Second
 const ownProfileSkipMaxMessageGap int32 = 3
 const groupedCaptionTTL = 2 * time.Minute
 const startupOwnProfileSkipTTL = 90 * time.Second
+const defaultProfileLLMCacheMaxEntries = 1000
+
+type profileLLMCacheEntry struct {
+	mbti   string
+	opener string
+}
 
 type ownProfileSkipContext struct {
 	markerMessageID int32
@@ -104,8 +113,49 @@ func NewStateMachine() *StateMachine {
 			"menu_recovery":  false,
 			"stuck_recovery": false,
 		},
-		groupedCaptions: make(map[int64]groupedCaptionContext),
+		groupedCaptions:    make(map[int64]groupedCaptionContext),
+		profileLLMCache:    make(map[string]profileLLMCacheEntry),
+		profileLLMCacheMax: defaultProfileLLMCacheMaxEntries,
 	}
+}
+
+func (sm *StateMachine) GetProfileLLMCache(key string) (mbti string, opener string, ok bool) {
+	if key == "" {
+		return "", "", false
+	}
+
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	entry, ok := sm.profileLLMCache[key]
+	if !ok {
+		return "", "", false
+	}
+
+	return entry.mbti, entry.opener, true
+}
+
+func (sm *StateMachine) SetProfileLLMCache(key, mbti, opener string) {
+	if key == "" {
+		return
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if _, exists := sm.profileLLMCache[key]; !exists {
+		sm.profileLLMCacheOrder = append(sm.profileLLMCacheOrder, key)
+	}
+
+	sm.profileLLMCache[key] = profileLLMCacheEntry{mbti: mbti, opener: opener}
+
+	if len(sm.profileLLMCache) <= sm.profileLLMCacheMax {
+		return
+	}
+
+	oldestKey := sm.profileLLMCacheOrder[0]
+	sm.profileLLMCacheOrder = sm.profileLLMCacheOrder[1:]
+	delete(sm.profileLLMCache, oldestKey)
 }
 
 func (sm *StateMachine) GetState() State {
