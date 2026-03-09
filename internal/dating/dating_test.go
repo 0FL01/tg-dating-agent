@@ -34,6 +34,12 @@ type scriptedSummarizer struct {
 	cancel       context.CancelFunc
 }
 
+func (s *scriptedSummarizer) snapshotCallCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.callCount
+}
+
 func (s *scriptedSummarizer) SummarizeMultimodal(_ context.Context, _ string, prompt string, _ llm.MultimodalContent, _ float64) (string, error) {
 	s.mu.Lock()
 	call := s.callCount + 1
@@ -994,6 +1000,123 @@ func TestGenerateAndSendLikeReplyAuditErrorDoesNotStopFlow(t *testing.T) {
 
 	if len(audit.snapshotCalls()) != 1 {
 		t.Fatalf("reply audit call count = %d, want 1", len(audit.snapshotCalls()))
+	}
+}
+
+func TestGenerateAndSendLikeUsesProfileLLMCacheForSinglePhoto(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	summarizer := &scriptedSummarizer{
+		responses:    []string{"INTJ", "cached opener"},
+		cancelOnCall: 2,
+		cancel:       cancel,
+	}
+
+	h := &Handler{
+		state: NewStateMachine(),
+		config: &standalone.Config{
+			DatingMBTIPrompt:    "mbti prompt",
+			DatingMBTIAllowlist: []string{"INTJ"},
+		},
+		client:      summarizer,
+		model:       "model",
+		prompt:      "reply prompt",
+		temperature: 0.2,
+	}
+
+	first := ProfileData{
+		ProfileText:      "  Alice   \n  bio  ",
+		PhotoPaths:       []string{"/tmp/photo-first.jpg"},
+		PhotoIdentifiers: []string{"100:200"},
+	}
+	if err := h.generateAndSendLike(ctx, first); err != nil {
+		t.Fatalf("generateAndSendLike(first) error = %v, want nil", err)
+	}
+
+	second := ProfileData{
+		ProfileText:      "alice bio",
+		PhotoPaths:       []string{"/tmp/photo-second.jpg"},
+		PhotoIdentifiers: []string{"100:200"},
+	}
+	if err := h.generateAndSendLike(ctx, second); err != nil {
+		t.Fatalf("generateAndSendLike(second) error = %v, want nil", err)
+	}
+
+	if got := summarizer.snapshotCallCount(); got != 2 {
+		t.Fatalf("SummarizeMultimodal calls = %d, want 2 (single MBTI+opener pass, cached second pass)", got)
+	}
+}
+
+func TestGenerateAndSendLikeUsesProfileLLMCacheForAlbumWithStablePhotoOrdering(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	summarizer := &scriptedSummarizer{
+		responses:    []string{"INTJ", "album opener"},
+		cancelOnCall: 2,
+		cancel:       cancel,
+	}
+
+	h := &Handler{
+		state: NewStateMachine(),
+		config: &standalone.Config{
+			DatingMBTIPrompt:    "mbti prompt",
+			DatingMBTIAllowlist: []string{"INTJ"},
+		},
+		client:      summarizer,
+		model:       "model",
+		prompt:      "reply prompt",
+		temperature: 0.2,
+	}
+
+	albumOne := &telegram.Album{Messages: []*telegram.NewMessage{
+		{
+			ID: 200,
+			Message: &telegram.MessageObj{
+				Media: &telegram.MessageMediaPhoto{Photo: &telegram.PhotoObj{ID: 2, AccessHash: 22}},
+			},
+		},
+		{
+			ID: 100,
+			Message: &telegram.MessageObj{
+				Media: &telegram.MessageMediaPhoto{Photo: &telegram.PhotoObj{ID: 1, AccessHash: 11}},
+			},
+		},
+	}}
+	albumTwo := &telegram.Album{Messages: []*telegram.NewMessage{
+		{
+			ID: 100,
+			Message: &telegram.MessageObj{
+				Media: &telegram.MessageMediaPhoto{Photo: &telegram.PhotoObj{ID: 1, AccessHash: 11}},
+			},
+		},
+		{
+			ID: 200,
+			Message: &telegram.MessageObj{
+				Media: &telegram.MessageMediaPhoto{Photo: &telegram.PhotoObj{ID: 2, AccessHash: 22}},
+			},
+		},
+	}}
+
+	firstIDs := photoIdentifiersFromAlbum(albumOne)
+	secondIDs := photoIdentifiersFromAlbum(albumTwo)
+
+	firstKey := buildProfileLLMCacheKey("Album profile", firstIDs)
+	secondKey := buildProfileLLMCacheKey("  album   profile ", secondIDs)
+	if firstKey != secondKey {
+		t.Fatalf("buildProfileLLMCacheKey() mismatch for equivalent albums: %q != %q", firstKey, secondKey)
+	}
+
+	if err := h.generateAndSendLike(ctx, ProfileData{ProfileText: "Album profile", PhotoPaths: []string{"/tmp/a.jpg"}, PhotoIdentifiers: firstIDs}); err != nil {
+		t.Fatalf("generateAndSendLike(first album) error = %v, want nil", err)
+	}
+	if err := h.generateAndSendLike(ctx, ProfileData{ProfileText: "  album   profile ", PhotoPaths: []string{"/tmp/b.jpg"}, PhotoIdentifiers: secondIDs}); err != nil {
+		t.Fatalf("generateAndSendLike(second album) error = %v, want nil", err)
+	}
+
+	if got := summarizer.snapshotCallCount(); got != 2 {
+		t.Fatalf("SummarizeMultimodal calls = %d, want 2 (single MBTI+opener pass, cached second pass)", got)
 	}
 }
 

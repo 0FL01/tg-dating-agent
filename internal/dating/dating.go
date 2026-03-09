@@ -2,11 +2,14 @@ package dating
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
 	"math/rand"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -311,6 +314,7 @@ func (h *Handler) downloadProfileData(ctx context.Context, m *telegram.NewMessag
 	}
 
 	data.PhotoPaths = photoPaths
+	data.PhotoIdentifiers = photoIdentifiersFromMessage(m)
 	data.ProfileText = m.Text()
 
 	log.Printf("[%s] Profile text: %s", h.Name(), utils.Truncate(data.ProfileText, 100))
@@ -330,16 +334,56 @@ func (h *Handler) generateAndSendLike(ctx context.Context, data ProfileData) err
 		ImagePaths: data.PhotoPaths,
 	}
 
-	mbtiRaw, err := h.client.SummarizeMultimodal(ctx, h.model, h.config.DatingMBTIPrompt, content, h.temperature)
-	if err != nil {
-		log.Printf("[%s] Failed to analyze MBTI: %v, skipping profile", h.Name(), err)
-		return h.clickButtonWithContext(ctx, ButtonDislike)
+	cacheKey := buildProfileLLMCacheKey(data.ProfileText, data.PhotoIdentifiers)
+	cacheKeyLog := cacheKey
+	if len(cacheKeyLog) > 12 {
+		cacheKeyLog = cacheKeyLog[:12]
 	}
 
-	mbti, ok := parseMBTI(mbtiRaw)
-	if !ok {
-		log.Printf("[%s] Failed to parse MBTI from response %q, skipping profile", h.Name(), utils.Truncate(mbtiRaw, 60))
-		return h.clickButtonWithContext(ctx, ButtonDislike)
+	var (
+		mbti         string
+		generatedMsg string
+	)
+
+	if cachedMBTI, cachedOpener, ok := h.state.GetProfileLLMCache(cacheKey); ok && cachedMBTI != "" && cachedOpener != "" {
+		mbti = cachedMBTI
+		generatedMsg = cachedOpener
+		log.Printf("[%s] Profile LLM cache hit (key=%s, text_len=%d, photos=%d)", h.Name(), cacheKeyLog, len(strings.TrimSpace(data.ProfileText)), len(data.PhotoIdentifiers))
+	} else {
+		log.Printf("[%s] Profile LLM cache miss (key=%s, text_len=%d, photos=%d)", h.Name(), cacheKeyLog, len(strings.TrimSpace(data.ProfileText)), len(data.PhotoIdentifiers))
+
+		mbtiRaw, err := h.client.SummarizeMultimodal(ctx, h.model, h.config.DatingMBTIPrompt, content, h.temperature)
+		if err != nil {
+			log.Printf("[%s] Failed to analyze MBTI: %v, skipping profile", h.Name(), err)
+			return h.clickButtonWithContext(ctx, ButtonDislike)
+		}
+
+		parsedMBTI, ok := parseMBTI(mbtiRaw)
+		if !ok {
+			log.Printf("[%s] Failed to parse MBTI from response %q, skipping profile", h.Name(), utils.Truncate(mbtiRaw, 60))
+			return h.clickButtonWithContext(ctx, ButtonDislike)
+		}
+		mbti = parsedMBTI
+
+		if !isMBTIAllowed(mbti, h.config.DatingMBTIAllowlist) {
+			log.Printf("[%s] MBTI %s is not in allowlist %v, skipping profile", h.Name(), mbti, h.config.DatingMBTIAllowlist)
+			return h.clickButtonWithContext(ctx, ButtonDislike)
+		}
+
+		log.Printf("[%s] MBTI %s is allowed, generating reply", h.Name(), mbti)
+		if shouldStopWorker(ctx, h.state.ShouldQuit()) || h.state.IsStopped() {
+			return nil
+		}
+
+		generatedMsg, err = h.client.SummarizeMultimodal(ctx, h.model, h.prompt, content, h.temperature)
+		if err != nil {
+			log.Printf("[%s] Failed to generate message: %v", h.Name(), err)
+			return h.clickButtonWithContext(ctx, ButtonDislike)
+		}
+		h.appendReplyAudit(mbti, h.prompt, generatedMsg)
+
+		h.state.SetProfileLLMCache(cacheKey, mbti, generatedMsg)
+		log.Printf("[%s] Profile LLM cache stored (key=%s)", h.Name(), cacheKeyLog)
 	}
 
 	if !isMBTIAllowed(mbti, h.config.DatingMBTIAllowlist) {
@@ -355,13 +399,6 @@ func (h *Handler) generateAndSendLike(ctx context.Context, data ProfileData) err
 	data.MBTI = mbti
 	h.state.SetProfileData(&data)
 	h.state.ResetRetry()
-
-	generatedMsg, err := h.client.SummarizeMultimodal(ctx, h.model, h.prompt, content, h.temperature)
-	if err != nil {
-		log.Printf("[%s] Failed to generate message: %v", h.Name(), err)
-		return h.clickButtonWithContext(ctx, ButtonDislike)
-	}
-	h.appendReplyAudit(mbti, h.prompt, generatedMsg)
 
 	log.Printf("[%s] Generated message: %s", h.Name(), utils.Truncate(generatedMsg, 100))
 	if shouldStopWorker(ctx, h.state.ShouldQuit()) || h.state.IsStopped() {
@@ -1302,6 +1339,7 @@ func (h *Handler) downloadAlbumData(ctx context.Context, a *telegram.Album, prof
 	}
 
 	data.PhotoPaths = photoPaths
+	data.PhotoIdentifiers = photoIdentifiersFromAlbum(a)
 	data.ProfileText = profileText
 
 	cleanup := func() {
@@ -1360,4 +1398,105 @@ func extractBioText(profileText string) string {
 
 func writableTempDownloadDir() string {
 	return os.TempDir() + string(os.PathSeparator)
+}
+
+type photoIdentifier struct {
+	messageID  int32
+	index      int
+	identifier string
+}
+
+func photoIdentifiersFromMessage(m *telegram.NewMessage) []string {
+	if m == nil {
+		return nil
+	}
+
+	photo := m.Photo()
+	if photo == nil {
+		return nil
+	}
+
+	return []string{fmt.Sprintf("%d:%d", photo.ID, photo.AccessHash)}
+}
+
+func photoIdentifiersFromAlbum(a *telegram.Album) []string {
+	if a == nil {
+		return nil
+	}
+
+	identifiers := make([]photoIdentifier, 0, len(a.Messages))
+	for i, msg := range a.Messages {
+		if msg == nil {
+			continue
+		}
+
+		photo := msg.Photo()
+		if photo == nil {
+			continue
+		}
+
+		identifiers = append(identifiers, photoIdentifier{
+			messageID:  msg.ID,
+			index:      i,
+			identifier: fmt.Sprintf("%d:%d", photo.ID, photo.AccessHash),
+		})
+	}
+
+	if len(identifiers) == 0 {
+		return nil
+	}
+
+	sort.SliceStable(identifiers, func(i, j int) bool {
+		left := identifiers[i]
+		right := identifiers[j]
+
+		if left.messageID > 0 && right.messageID > 0 && left.messageID != right.messageID {
+			return left.messageID < right.messageID
+		}
+		if left.messageID > 0 && right.messageID <= 0 {
+			return true
+		}
+		if left.messageID <= 0 && right.messageID > 0 {
+			return false
+		}
+		if left.index != right.index {
+			return left.index < right.index
+		}
+
+		return left.identifier < right.identifier
+	})
+
+	keys := make([]string, 0, len(identifiers))
+	for _, item := range identifiers {
+		keys = append(keys, item.identifier)
+	}
+
+	return keys
+}
+
+func normalizeProfileTextForCache(text string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(text))
+	if trimmed == "" {
+		return ""
+	}
+
+	return strings.Join(strings.Fields(trimmed), " ")
+}
+
+func buildProfileLLMCacheKey(profileText string, photoIDs []string) string {
+	normalizedText := normalizeProfileTextForCache(profileText)
+
+	b := strings.Builder{}
+	b.WriteString("v1|")
+	b.WriteString(normalizedText)
+	b.WriteString("|")
+	for i, photoID := range photoIDs {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(strings.TrimSpace(photoID))
+	}
+
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])
 }
