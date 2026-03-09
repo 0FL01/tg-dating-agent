@@ -220,6 +220,14 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 	}
 
 	if hasProfileActionKeyboard(m) && isNonEmptyTextOnlyMessage(text) {
+		if isMineMessage(text) {
+			log.Printf("[%s] Detected mine/interstitial message, enqueuing mine recovery", h.Name())
+			if !h.state.Enqueue(ProfileJob{Type: "mine_recovery", Message: m}) {
+				log.Printf("[%s] Queue full, skipping mine recovery", h.Name())
+			}
+			return nil
+		}
+
 		if !h.state.Enqueue(ProfileJob{Type: "message", Message: m, ProfileMessageID: m.ID}) {
 			log.Printf("[%s] Queue full, skipping text-only profile", h.Name())
 		}
@@ -255,6 +263,15 @@ func (h *Handler) shouldRecoverFromStuck(m *telegram.NewMessage) bool {
 
 func isNonEmptyTextOnlyMessage(text string) bool {
 	return strings.TrimSpace(text) != ""
+}
+
+func isMineMessage(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	if normalized == "" {
+		return false
+	}
+
+	return strings.Contains(normalized, PatternMineKeywords)
 }
 
 func isDailyLimitMessage(text string) bool {
@@ -870,6 +887,25 @@ func (h *Handler) sendBootstrapCommand(command string) error {
 	return nil
 }
 
+func (h *Handler) sendStartCommand(ctx context.Context) error {
+	if h.shouldStopProcessing(ctx) {
+		return nil
+	}
+
+	peer, err := h.ensureBotPeer(ctx)
+	if err != nil {
+		return err
+	}
+
+	err = h.sendDatingMessage(ctx, peer, "/start")
+	if err != nil {
+		return fmt.Errorf("failed to send /start for mine recovery: %w", err)
+	}
+
+	h.state.ArmStartupOwnProfileSkip(time.Now())
+	return nil
+}
+
 func (h *Handler) HandleAlbum(a *telegram.Album) error {
 	h.cacheBotPeerFromAlbum(a)
 
@@ -961,6 +997,9 @@ func (h *Handler) processJob(ctx context.Context, job ProfileJob) error {
 	case "stuck_recovery":
 		log.Printf("[%s] Processing stuck recovery job", h.Name())
 		return h.clickButtonWithContext(ctx, ButtonViewProfiles)
+	case "mine_recovery":
+		log.Printf("[%s] Processing mine recovery job", h.Name())
+		return h.sendStartCommand(ctx)
 	default:
 		log.Printf("[%s] Unknown job type: %s", h.Name(), job.Type)
 		return nil

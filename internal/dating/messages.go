@@ -14,6 +14,7 @@ const (
 	PatternTooManyLikes    = "too many"
 	PatternYourProfile     = "your profile" // English pattern
 	PatternYourProfileRU   = "твой профиль" // Russian pattern
+	PatternMineKeywords    = "создали закрытый канал"
 )
 
 const (
