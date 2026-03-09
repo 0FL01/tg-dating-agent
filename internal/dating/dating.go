@@ -219,6 +219,13 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 		return nil
 	}
 
+	if hasProfileActionKeyboard(m) && isNonEmptyTextOnlyMessage(text) {
+		if !h.state.Enqueue(ProfileJob{Type: "message", Message: m, ProfileMessageID: m.ID}) {
+			log.Printf("[%s] Queue full, skipping text-only profile", h.Name())
+		}
+		return nil
+	}
+
 	if h.shouldRecoverFromStuck(m) {
 		log.Printf("[%s] Recovering viewing flow from interstitial message", h.Name())
 		if !h.state.Enqueue(ProfileJob{Type: "stuck_recovery", Message: m}) {

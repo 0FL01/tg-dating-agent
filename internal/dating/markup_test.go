@@ -107,3 +107,56 @@ func TestHasReplyKeyboardButtonText(t *testing.T) {
 		})
 	}
 }
+
+func TestHasProfileActionKeyboard(t *testing.T) {
+	tests := []struct {
+		name    string
+		message *telegram.NewMessage
+		want    bool
+	}{
+		{
+			name:    "nil message",
+			message: nil,
+			want:    false,
+		},
+		{
+			name: "like and dislike buttons",
+			message: &telegram.NewMessage{Message: &telegram.MessageObj{ReplyMarkup: &telegram.ReplyKeyboardMarkup{Rows: []*telegram.KeyboardButtonRow{{Buttons: []telegram.KeyboardButton{
+				&telegram.KeyboardButtonObj{Text: ButtonLike},
+				&telegram.KeyboardButtonObj{Text: ButtonDislike},
+			}}}}}},
+			want: true,
+		},
+		{
+			name: "like message and dislike buttons",
+			message: &telegram.NewMessage{Message: &telegram.MessageObj{ReplyMarkup: &telegram.ReplyKeyboardMarkup{Rows: []*telegram.KeyboardButtonRow{{Buttons: []telegram.KeyboardButton{
+				&telegram.KeyboardButtonObj{Text: ButtonLikeMessage},
+				&telegram.KeyboardButtonObj{Text: ButtonDislike},
+			}}}}}},
+			want: true,
+		},
+		{
+			name: "missing dislike button",
+			message: &telegram.NewMessage{Message: &telegram.MessageObj{ReplyMarkup: &telegram.ReplyKeyboardMarkup{Rows: []*telegram.KeyboardButtonRow{{Buttons: []telegram.KeyboardButton{
+				&telegram.KeyboardButtonObj{Text: ButtonLike},
+			}}}}}},
+			want: false,
+		},
+		{
+			name: "unrelated keyboard",
+			message: &telegram.NewMessage{Message: &telegram.MessageObj{ReplyMarkup: &telegram.ReplyKeyboardMarkup{Rows: []*telegram.KeyboardButtonRow{{Buttons: []telegram.KeyboardButton{
+				&telegram.KeyboardButtonObj{Text: ButtonViewProfiles},
+				&telegram.KeyboardButtonObj{Text: ButtonMyProfile},
+			}}}}}},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasProfileActionKeyboard(tt.message); got != tt.want {
+				t.Fatalf("hasProfileActionKeyboard() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

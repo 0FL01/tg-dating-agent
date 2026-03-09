@@ -392,6 +392,51 @@ func TestHandleNonGroupedMediaStillEnqueuesMessageJob(t *testing.T) {
 	}
 }
 
+func TestHandleTextOnlyProfileActionKeyboardEnqueuesMessageJob(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+
+	msg := &telegram.NewMessage{ID: 406, Message: &telegram.MessageObj{
+		Message: "Андрей, subscribe to my channel ...",
+		ReplyMarkup: &telegram.ReplyKeyboardMarkup{Rows: []*telegram.KeyboardButtonRow{{Buttons: []telegram.KeyboardButton{
+			&telegram.KeyboardButtonObj{Text: ButtonLike},
+			&telegram.KeyboardButtonObj{Text: ButtonLikeMessage},
+			&telegram.KeyboardButtonObj{Text: ButtonDislike},
+		}}}},
+		PeerID: &telegram.PeerUser{UserID: h.chatID},
+	}}
+
+	if err := h.Handle(msg); err != nil {
+		t.Fatalf("Handle(text-only profile) error = %v", err)
+	}
+
+	job := mustDequeueJob(t, h.state)
+	if job.Type != "message" || job.Message == nil || job.Message.ID != 406 {
+		t.Fatalf("queued job = %+v, want message job id 406", job)
+	}
+	if job.ProfileMessageID != 406 {
+		t.Fatalf("message job ProfileMessageID = %d, want 406", job.ProfileMessageID)
+	}
+}
+
+func TestHandleTextOnlyUnrelatedKeyboardDoesNotEnqueueProfileJob(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+
+	msg := &telegram.NewMessage{ID: 407, Message: &telegram.MessageObj{
+		Message: "Андрей, subscribe to my channel ...",
+		ReplyMarkup: &telegram.ReplyKeyboardMarkup{Rows: []*telegram.KeyboardButtonRow{{Buttons: []telegram.KeyboardButton{
+			&telegram.KeyboardButtonObj{Text: ButtonViewProfiles},
+			&telegram.KeyboardButtonObj{Text: ButtonMyProfile},
+		}}}},
+		PeerID: &telegram.PeerUser{UserID: h.chatID},
+	}}
+
+	if err := h.Handle(msg); err != nil {
+		t.Fatalf("Handle(text-only unrelated keyboard) error = %v", err)
+	}
+
+	mustQueueEmpty(t, h.state)
+}
+
 func TestHandleSkipsStartupOwnProfileWithoutMarkerThenRecoversFromMenu(t *testing.T) {
 	h := &Handler{chatID: 123456789, state: NewStateMachine()}
 	h.state.ArmStartupOwnProfileSkip(time.Now())

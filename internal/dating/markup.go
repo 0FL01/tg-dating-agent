@@ -39,3 +39,15 @@ func hasReplyKeyboardButtonText(m *telegram.NewMessage, buttonText string) bool 
 
 	return false
 }
+
+func hasProfileActionKeyboard(m *telegram.NewMessage) bool {
+	if !hasReplyKeyboardButtonText(m, ButtonDislike) {
+		return false
+	}
+
+	if hasReplyKeyboardButtonText(m, ButtonLike) {
+		return true
+	}
+
+	return hasReplyKeyboardButtonText(m, ButtonLikeMessage)
+}
