@@ -9,6 +9,7 @@ const (
 	PatternLikedYouWoman   = "woman liked you"
 	PatternLikedYouMan     = "man liked you"
 	PatternLikedYouPrompt  = "liked you. have a look?"
+	PatternStartChatting   = "start chatting"
 	PatternWriteMessage    = "Write a message"
 	PatternViewProfiles    = "View profiles"
 	PatternTooLong         = "message is too long"
