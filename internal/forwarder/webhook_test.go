@@ -146,6 +146,30 @@ func TestWebhookHandlerFormattingAndForwarding(t *testing.T) {
 	}
 }
 
+func TestWebhookHandlerAcceptsDatingAgentPayloadSchema(t *testing.T) {
+	cfg := newTestForwarderConfig()
+	sender := &fakeMessageSender{}
+	h, err := NewWebhookHandler(cfg, sender)
+	if err != nil {
+		t.Fatalf("NewWebhookHandler() error = %v", err)
+	}
+
+	body := `{"event_type":"reciprocal_like_final","raw_contact_url":"https://t.me/test_user?text=hello","contact_username":"test_user","deeplink_text":"hello","profile_text":"Profile bio","opener_text":"Hi","mbti":"INFJ","context_captured_at":"2026-03-10T12:30:00Z","event_timestamp":"2026-03-10T12:30:45Z"}`
+	req := httptest.NewRequest(http.MethodPost, cfg.WebhookPath, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer token-123")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusAccepted)
+	}
+	if len(sender.messages) != 1 {
+		t.Fatalf("forwarded messages = %d, want 1", len(sender.messages))
+	}
+}
+
 func TestWebhookHandlerMethodAndPathHandling(t *testing.T) {
 	cfg := newTestForwarderConfig()
 	sender := &fakeMessageSender{}

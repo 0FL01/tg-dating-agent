@@ -23,13 +23,15 @@ type MessageSender interface {
 }
 
 type ReciprocalLikeFinalPayload struct {
-	EventType       string    `json:"event_type"`
-	RawContactURL   string    `json:"raw_contact_url"`
-	ContactUsername string    `json:"contact_username"`
-	ProfileText     string    `json:"profile_text,omitempty"`
-	OpenerText      string    `json:"opener_text,omitempty"`
-	MBTI            string    `json:"mbti,omitempty"`
-	EventTimestamp  time.Time `json:"event_timestamp,omitempty"`
+	EventType         string    `json:"event_type"`
+	RawContactURL     string    `json:"raw_contact_url"`
+	ContactUsername   string    `json:"contact_username"`
+	DeeplinkText      string    `json:"deeplink_text,omitempty"`
+	ProfileText       string    `json:"profile_text,omitempty"`
+	OpenerText        string    `json:"opener_text,omitempty"`
+	MBTI              string    `json:"mbti,omitempty"`
+	ContextCapturedAt time.Time `json:"context_captured_at,omitempty"`
+	EventTimestamp    time.Time `json:"event_timestamp,omitempty"`
 }
 
 func (p ReciprocalLikeFinalPayload) Validate() error {
