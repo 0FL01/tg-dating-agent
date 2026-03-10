@@ -257,7 +257,7 @@ func (h *Handler) shouldRecoverFromStuck(m *telegram.NewMessage) bool {
 		return true
 	}
 
-	if hasReplyMarkup(m) {
+	if hasProfileActionKeyboard(m) {
 		return false
 	}
 

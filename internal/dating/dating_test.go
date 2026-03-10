@@ -437,6 +437,66 @@ func TestHandleTextOnlyUnrelatedKeyboardDoesNotEnqueueProfileJob(t *testing.T) {
 	mustQueueEmpty(t, h.state)
 }
 
+func TestHandleViewingProfilesInterstitialWithUnrelatedMarkupEnqueuesStuckRecovery(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+
+	msg := &telegram.NewMessage{ID: 408, Message: &telegram.MessageObj{
+		Message: "Андрей, subscribe to my channel 👉 @Leomatchglobal",
+		ReplyMarkup: &telegram.ReplyKeyboardMarkup{Rows: []*telegram.KeyboardButtonRow{{Buttons: []telegram.KeyboardButton{
+			&telegram.KeyboardButtonObj{Text: ButtonMyProfile},
+			&telegram.KeyboardButtonObj{Text: "Promo"},
+		}}}},
+		PeerID: &telegram.PeerUser{UserID: h.chatID},
+	}}
+
+	if err := h.Handle(msg); err != nil {
+		t.Fatalf("Handle(interstitial) error = %v", err)
+	}
+
+	job := mustDequeueJob(t, h.state)
+	if job.Type != "stuck_recovery" || job.Message == nil || job.Message.ID != 408 {
+		t.Fatalf("queued job = %+v, want stuck_recovery job id 408", job)
+	}
+
+	if got := h.state.GetState(); got != StateViewingProfiles {
+		t.Fatalf("state after Handle(interstitial) = %v, want %v", got, StateViewingProfiles)
+	}
+
+	select {
+	case <-h.state.ShouldQuit():
+		t.Fatal("quit channel closed for interstitial recovery")
+	default:
+	}
+}
+
+func TestHandleViewingProfilesProfileActionKeyboardStillEnqueuesProfileMessage(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+
+	msg := &telegram.NewMessage{ID: 409, Message: &telegram.MessageObj{
+		Message: "Profile text",
+		ReplyMarkup: &telegram.ReplyKeyboardMarkup{Rows: []*telegram.KeyboardButtonRow{{Buttons: []telegram.KeyboardButton{
+			&telegram.KeyboardButtonObj{Text: ButtonLike},
+			&telegram.KeyboardButtonObj{Text: ButtonLikeMessage},
+			&telegram.KeyboardButtonObj{Text: ButtonDislike},
+		}}}},
+		PeerID: &telegram.PeerUser{UserID: h.chatID},
+	}}
+
+	if err := h.Handle(msg); err != nil {
+		t.Fatalf("Handle(profile-action text) error = %v", err)
+	}
+
+	job := mustDequeueJob(t, h.state)
+	if job.Type != "message" || job.Message == nil || job.Message.ID != 409 {
+		t.Fatalf("queued job = %+v, want message job id 409", job)
+	}
+	if job.ProfileMessageID != 409 {
+		t.Fatalf("message job ProfileMessageID = %d, want 409", job.ProfileMessageID)
+	}
+}
+
 func TestHandleSkipsStartupOwnProfileWithoutMarkerThenRecoversFromMenu(t *testing.T) {
 	h := &Handler{chatID: 123456789, state: NewStateMachine()}
 	h.state.ArmStartupOwnProfileSkip(time.Now())
@@ -1259,11 +1319,24 @@ func TestShouldRecoverFromStuck(t *testing.T) {
 			want: false,
 		},
 		{
-			name:  "viewing state with text but non-empty markup",
+			name:  "viewing state with text and unrelated markup",
 			state: StateViewingProfiles,
 			message: &telegram.NewMessage{Message: &telegram.MessageObj{
 				Message:     "This is a generic informational notice.",
 				ReplyMarkup: &telegram.ReplyInlineMarkup{},
+			}},
+			want: true,
+		},
+		{
+			name:  "viewing state with profile action keyboard",
+			state: StateViewingProfiles,
+			message: &telegram.NewMessage{Message: &telegram.MessageObj{
+				Message: "Profile text",
+				ReplyMarkup: &telegram.ReplyKeyboardMarkup{Rows: []*telegram.KeyboardButtonRow{{Buttons: []telegram.KeyboardButton{
+					&telegram.KeyboardButtonObj{Text: ButtonLike},
+					&telegram.KeyboardButtonObj{Text: ButtonLikeMessage},
+					&telegram.KeyboardButtonObj{Text: ButtonDislike},
+				}}}},
 			}},
 			want: false,
 		},
