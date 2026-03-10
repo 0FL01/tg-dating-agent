@@ -18,7 +18,6 @@
 - Определение MBTI-типа через мультимодальную модель (фото + текст)
 - Фильтрация по MBTI (`DATING_MBTI_ALLOWLIST`)
 - Кэширование результатов LLM для повторных анкет
-- Умный пропуска собственных анкет (по message-id и при старте)
 - Обработка альбомов с детерминированным привязыванием текста
 - Отправка уведомлений о взаимных лайках через вебхук
 - Повторная отправка сообщений (too long/too short)
@@ -42,7 +41,7 @@
 - Поддержка multipart-загрузки (JSON + фотографии)
 - Аутентификация через Bearer token или custom header
 - Отправка уведомлений через Telegram Bot API
-- Поддержка до 10 фотографий в сообщении
+- Поддержка фотографий в сообщении
 - Настраиваемый timeout и bind address
 
 ## Требования
@@ -93,31 +92,7 @@ go run ./cmd/dating
 - `FORWARDER_TARGET_CHAT_ID` — ID чата для уведомлений
 - `FORWARDER_WEBHOOK_AUTH_TOKEN` — токен для защиты вебхука (должен совпадать с `DATING_MATCH_WEBHOOK_TOKEN`)
 
-## Запуск локально
-
-### Dating Agent
-
-```bash
-go run ./cmd/dating
-```
-
-### Match Forwarder
-
-```bash
-# В терминале 1 (передайте .env.forwarder или установите переменные)
-go run ./cmd/match-forwarder
-```
-
-Или передайте переменные окружения напрямую:
-
-```bash
-FORWARDER_BOT_TOKEN="your_bot_token" \
-FORWARDER_TARGET_CHAT_ID="your_chat_id" \
-FORWARDER_WEBHOOK_AUTH_TOKEN="secret_token" \
-go run ./cmd/match-forwarder
-```
-
-## Запуск в Docker
+## Запуск
 
 ### Dating Agent
 
@@ -254,27 +229,6 @@ docker compose -f docker-compose.forwarder.yml up -d --build forwarder
 
 Отправьте эту команду как исходящее сообщение от вашего аккаунта.
 
-### Graceful Shutdown
-
-Dating Agent поддерживает корректное завершение:
-- Сигнал SIGTERM/SIGINT останавливает worker goroutine
-- Текущая анкета обрабатывается до конца
-- Очередь (buffer 50) drain-ится при stop
-
-## Безопасность
-
-**Dating Agent:**
-- Контейнер запускается не от root-пользователя
-- Корневая ФС контейнера read-only
-- Для `/tmp` используется tmpfs
-- Секреты храните только в `.env` (не коммитьте)
-
-**Match Forwarder:**
-- Bearer token аутентификация для вебхука
-- Non-root пользователь в контейнере
-- Read-only корневая ФС
-- Tmpfs для `/tmp`
-
 ## Архитектура
 
 ### Используемые паттерны
@@ -293,17 +247,3 @@ Dating Agent поддерживает корректное завершение:
 - Mutex для own-profile skip context
 - Детерминированное привязывание текста к фото в альбомах
 - Race-safe доступ к кэшам
-
-## Тестирование
-
-```bash
-# Все тесты
-go test ./...
-
-# С проверкой race conditions
-go test -race ./...
-
-# Тесты конкретного пакета
-go test ./internal/dating
-go test ./internal/forwarder
-```
