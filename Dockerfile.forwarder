@@ -1,0 +1,46 @@
+# Multi-stage build for tg-dating-agent match forwarder
+# Stage 1: Build
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /app
+
+# Install git for fetching dependencies
+RUN apk add --no-cache git
+
+# Copy dependency files first for better layer caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the binary
+# CGO_ENABLED=0 for static binary
+# -ldflags="-w -s" for smaller binary (strip debug info)
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags="-w -s" \
+    -o match-forwarder \
+    ./cmd/match-forwarder
+
+# Stage 2: Runtime
+FROM alpine:3.23
+
+# Create non-root user for security
+RUN addgroup -g 1000 -S forwarder && \
+    adduser -u 1000 -S forwarder -G forwarder
+
+# Install ca-certificates for HTTPS requests
+RUN apk add --no-cache ca-certificates
+
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /app/match-forwarder .
+
+# Switch to non-root user
+USER forwarder
+
+# Forwarder webhook listener
+EXPOSE 8080
+
+ENTRYPOINT ["./match-forwarder"]

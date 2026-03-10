@@ -1,0 +1,16 @@
+services:
+  match-forwarder:
+    build:
+      context: .
+      dockerfile: Dockerfile.forwarder
+    container_name: tg-dating-match-forwarder
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    # Read-only root filesystem for additional security
+    read_only: true
+    # Temporary filesystem for any write operations
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
