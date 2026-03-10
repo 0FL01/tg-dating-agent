@@ -610,6 +610,42 @@ func TestProcessJobStuckRecoverySkipsActionsWhenPaused(t *testing.T) {
 	}
 }
 
+func TestProcessJobStuckRecoverySkipsWhenFresherProfilePending(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+	h.setBotPeer(&telegram.InputPeerUser{UserID: h.chatID, AccessHash: 1})
+
+	// Put escalation at level 2 to verify skip path resets it.
+	h.state.NextStuckRecoveryEscalation()
+	h.state.NextStuckRecoveryEscalation()
+
+	if ok := h.state.Enqueue(ProfileJob{Type: "message", ProfileMessageID: 700}); !ok {
+		t.Fatal("Enqueue(profile id=700) = false, want true")
+	}
+
+	actionCalls := 0
+	h.clickButtonFn = func(_ context.Context, _ string) error {
+		actionCalls++
+		return nil
+	}
+	h.sendMessageFn = func(_ context.Context, _ telegram.InputPeer, _ string) error {
+		actionCalls++
+		return nil
+	}
+
+	if err := h.processJob(context.Background(), ProfileJob{Type: "stuck_recovery"}); err != nil {
+		t.Fatalf("processJob(stuck_recovery) error = %v", err)
+	}
+
+	if actionCalls != 0 {
+		t.Fatalf("stuck recovery actions with pending profile = %d, want 0", actionCalls)
+	}
+
+	if got := h.state.NextStuckRecoveryEscalation(); got != 1 {
+		t.Fatalf("NextStuckRecoveryEscalation() after pending-profile skip = %d, want 1", got)
+	}
+}
+
 func TestHandleProfileActionKeyboardRoutingUnaffectedByStuckEscalationState(t *testing.T) {
 	h := &Handler{chatID: 123456789, state: NewStateMachine()}
 	h.state.SetState(StateViewingProfiles)

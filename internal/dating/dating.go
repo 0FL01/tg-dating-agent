@@ -1073,6 +1073,12 @@ func (h *Handler) processJob(ctx context.Context, job ProfileJob) error {
 			return nil
 		}
 
+		if hasPending, latest, last := h.state.HasPendingFresherProfileJob(); hasPending {
+			log.Printf("[%s] Skipping stuck recovery due to pending fresher profile job (latest=%d last=%d)", h.Name(), latest, last)
+			h.state.ResetStuckRecoveryEscalation()
+			return nil
+		}
+
 		escalation := h.state.NextStuckRecoveryEscalation()
 		switch escalation {
 		case 1:

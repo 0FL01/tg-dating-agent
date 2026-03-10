@@ -277,6 +277,30 @@ func TestStateMachineTryMarkProfileJobProcessingRejectsStaleAndDuplicate(t *test
 	}
 }
 
+func TestStateMachineHasPendingFresherProfileJob(t *testing.T) {
+	sm := NewStateMachine()
+
+	if pending, latest, last := sm.HasPendingFresherProfileJob(); pending {
+		t.Fatalf("HasPendingFresherProfileJob() pending=true, want false (latest=%d last=%d)", latest, last)
+	}
+
+	if ok := sm.Enqueue(ProfileJob{Type: "message", ProfileMessageID: 205}); !ok {
+		t.Fatal("Enqueue(id=205) = false, want true")
+	}
+
+	if pending, latest, last := sm.HasPendingFresherProfileJob(); !pending {
+		t.Fatalf("HasPendingFresherProfileJob() pending=false, want true (latest=%d last=%d)", latest, last)
+	}
+
+	if accepted, _, _ := sm.TryMarkProfileJobProcessing(205); !accepted {
+		t.Fatal("TryMarkProfileJobProcessing(205) accepted=false, want true")
+	}
+
+	if pending, latest, last := sm.HasPendingFresherProfileJob(); pending {
+		t.Fatalf("HasPendingFresherProfileJob() pending=true after processing, want false (latest=%d last=%d)", latest, last)
+	}
+}
+
 func TestStateMachineProfileLLMCacheSetGet(t *testing.T) {
 	sm := NewStateMachine()
 

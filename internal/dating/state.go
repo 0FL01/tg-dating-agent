@@ -692,6 +692,16 @@ func (sm *StateMachine) TryMarkProfileJobProcessing(profileMessageID int32) (acc
 	return true, latest, sm.lastProcessedJobID
 }
 
+// HasPendingFresherProfileJob reports whether a newer profile job is queued but not yet processed.
+func (sm *StateMachine) HasPendingFresherProfileJob() (hasPending bool, latest int32, lastProcessed int32) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	latest = sm.latestProfileJobID
+	lastProcessed = sm.lastProcessedJobID
+	return latest > lastProcessed, latest, lastProcessed
+}
+
 func (sm *StateMachine) ConsumeOwnProfileSkip(candidateMessageID int32, now time.Time) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
