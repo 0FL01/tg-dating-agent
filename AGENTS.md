@@ -30,10 +30,16 @@ The default branch is `main`.
 │   │   ├── messages.go          # Constants: button texts, patterns, retry prompts
 │   │   ├── markup.go            # Reply markup helpers for button detection
 │   │   ├── webhook_client.go    # Outbound webhook client for reciprocal-like events
+│   │   ├── reciprocal_payload.go    # Reciprocal-like final payload builder, URL extraction, photo handling
+│   │   ├── reply_audit_logger.go    # JSONL audit logger for LLM replies
 │   │   ├── bootstrap.go         # Standalone handler wiring for external entrypoints
 │   │   ├── dating_test.go       # Tests for dating logic
 │   │   ├── state_test.go        # Tests for state machine
 │   │   ├── markup_test.go       # Tests for markup helpers
+│   │   ├── webhook_client_test.go   # Tests for webhook client
+│   │   ├── reciprocal_payload_test.go # Tests for reciprocal payload
+│   │   ├── reply_audit_logger_test.go # Tests for reply audit logger
+│   │   ├── new_handler_test.go   # Tests for NewHandler construction
 │   │   └── bootstrap_test.go    # Tests for bootstrap logic
 │   ├── forwarder/
 │   │   ├── config.go            # Forwarder environment config loading with defaults
@@ -65,8 +71,8 @@ The default branch is `main`.
 └── env.example                  # Environment variables template
 
 ### Key Modules
-- **dating**: Profile queue (buffer 50), worker goroutine, MBTI filtering, message generation workflow, retry logic, button detection; own-profile skip via correlated context (message-id + TTL) and startup fallback (90s TTL); recovery jobs (menu_recovery, stuck_recovery) with deduplication; deterministic album text binding (photo caption preference, message ID ordering); outbound webhook delivery for reciprocal-like events
-- **forwarder**: HTTP webhook server for receiving match notifications from Dating Agent, Telegram Bot API sender for delivering messages to target chat; authentication via Bearer token or custom header; configurable timeout and bind address
+- **dating**: Profile queue (buffer 50), worker goroutine, MBTI filtering, message generation workflow, retry logic, button detection; own-profile skip via correlated context (message-id + TTL) and startup fallback (90s TTL); recovery jobs (menu_recovery, stuck_recovery) with deduplication; deterministic album text binding (photo caption preference, message ID ordering); outbound webhook delivery for reciprocal-like events; reply audit logging (JSONL); profile LLM cache (1000 entries); reciprocal-like context (64 entries, 30min TTL)
+- **forwarder**: HTTP webhook server for receiving match notifications from Dating Agent, Telegram Bot API sender for delivering messages to target chat; multipart photo support (max 10 photos, 2MB each); authentication via Bearer token or custom header; configurable timeout and bind address
 - **llm**: OpenRouter integration with image+text multimodal support
 - **standalone**: Configuration, authentication, and bootstrap wiring
 - **tghelper**: Resilient Telegram API operations with retry logic, exponential backoff, jitter
@@ -81,11 +87,12 @@ The default branch is `main`.
 - **Cleanup Pattern**: Deferred cleanup for temporary photo downloads
 - **Bootstrap Pattern**: `bootstrap.go` provides standalone handler wiring for external entrypoints
 - **Button Detection**: `markup.go` detects reply keyboard buttons for flow recovery
+- **Caching Pattern**: Profile LLM cache (1000 entries max) for MBTI/opener results; reciprocal-like context (64 entries, 30min TTL) for payload enrichment
 
 ### 2. Conventions
 - **Testing**: Unit tests in `*_test.go` files alongside source; race-focused tests in dating_test.go and state_test.go cover skip-context correlation, album text binding determinism, concurrent bot peer cache access, and bootstrap sequencing with state mutations
 - **Error Handling**: Log and continue; graceful degradation (skip profile on LLM failure)
-- **Configuration**: Environment variables with sensible defaults in `internal/standalone/config.go`
+- **Configuration**: Environment variables with sensible defaults in `internal/standalone/config.go` and `internal/forwarder/config.go`
 - **Security**: Non-root Docker user, read-only root filesystem, tmpfs for /tmp
 
 ### 3. State Management
@@ -94,17 +101,28 @@ States: `idle` → `enqueue` (add to queue) → `viewing_profiles` → `waiting_
 - Stopped on match or `*stop`/`💤` command
 - Sequential processing via worker goroutine with buffered profile queue (50 jobs)
 - Graceful shutdown: worker goroutine terminated via quitChan; queue drained on stop
-- **Match Forwarding**: Reciprocal-like final events trigger outbound webhook delivery (if configured); forwarder receives payload and formats/sends Telegram message to target chat
+- **Match Forwarding**: Reciprocal-like final events trigger outbound webhook delivery (if configured); forwarder receives multipart payload (JSON + optional photos) and formats/sends Telegram message to target chat
 
 ### 4. LLM Integration Flow
 1. Download profile photo(s) (single photo or album)
 2. Analyze MBTI via LLM (multimodal: photo + bio)
 3. Filter by MBTI allowlist (default: INTJ, INFJ, ENTJ, ENFJ)
 4. Generate first message via LLM
-5. Send like with generated message
-6. Handle retry scenarios (too long/too short messages) with fallback logic
+5. Log reply to JSONL audit log if configured
+6. Send like with generated message
+7. Handle retry scenarios (too long/too short messages) with fallback logic
+8. On mutual-like: build payload with contact URL, profile text, opener, MBTI; deliver via webhook
 
-### 5. Key Environment Variables
+### 5. Reciprocal-Like Payload Flow
+1. Detect "start chatting" message from bot
+2. Extract Telegram contact URL (t.me or telegram.me) from message entities or text
+3. Match profile text with cached reciprocal-like context (MBTI, opener, profile text)
+4. Build `ReciprocalLikeFinalPayload` with: event_type, raw_contact_url, contact_username, deeplink_text, profile_text, opener_text, mbti, context_captured_at, event_timestamp
+5. Optionally attach profile photos (max 10, 2MB each)
+6. Deliver via outbound webhook HTTP POST (multipart/form-data)
+7. Forwarder receives, validates, and formats message to target chat
+
+### 6. Key Environment Variables
 
 #### Dating Agent
 - `TG_APP_ID`, `TG_APP_HASH` (or `TG_APP_APP_HASH`) - Telegram API credentials
