@@ -25,32 +25,37 @@ type Config struct {
 	OpenRouterModel  string // Model for LLM requests
 
 	// Dating bot settings (full set as used by internal/skills/dating)
-	DatingBotChatID         int64
-	DatingBotUsername       string
-	DatingModel             string
-	DatingPrompt            string
-	DatingMBTIPrompt        string
-	DatingMBTIAllowlist     []string
-	DatingActionDelay       time.Duration
-	DatingJitterDelay       time.Duration
-	DatingTemperature       float64
-	DatingSkipLowQuality    bool
-	DatingMinBioLength      int
-	DatingReplyAuditLogPath string
+	DatingBotChatID           int64
+	DatingBotUsername         string
+	DatingModel               string
+	DatingPrompt              string
+	DatingMBTIPrompt          string
+	DatingMBTIAllowlist       []string
+	DatingActionDelay         time.Duration
+	DatingJitterDelay         time.Duration
+	DatingTemperature         float64
+	DatingSkipLowQuality      bool
+	DatingMinBioLength        int
+	DatingReplyAuditLogPath   string
+	DatingMatchWebhookURL     string
+	DatingMatchWebhookToken   string
+	DatingMatchWebhookTimeout time.Duration
+	DatingInstanceName        string
 }
 
 // Default values for Dating configuration.
 const (
-	DefaultDatingBotChatID         int64 = 1234060895
-	DefaultDatingBotUsername             = "leomatchbot"
-	DefaultDatingModel                   = "google/gemini-2.5-flash-lite-preview-06-2025"
-	DefaultDatingActionDelay             = 15 * time.Second
-	DefaultDatingJitterMax               = 5 * time.Second
-	DefaultDatingTemperature             = 0.7
-	DefaultDatingMinBioLength            = 50
-	DefaultDatingReplyAuditLogPath       = "/app/logs/replies.jsonl"
-	DefaultOpenRouterModel               = "google/gemini-2.5-flash"
-	DefaultSessionPath                   = "session.dat"
+	DefaultDatingBotChatID           int64 = 1234060895
+	DefaultDatingBotUsername               = "leomatchbot"
+	DefaultDatingModel                     = "google/gemini-2.5-flash-lite-preview-06-2025"
+	DefaultDatingActionDelay               = 15 * time.Second
+	DefaultDatingJitterMax                 = 5 * time.Second
+	DefaultDatingTemperature               = 0.7
+	DefaultDatingMinBioLength              = 50
+	DefaultDatingReplyAuditLogPath         = "/app/logs/replies.jsonl"
+	DefaultDatingMatchWebhookTimeout       = 5 * time.Second
+	DefaultOpenRouterModel                 = "google/gemini-2.5-flash"
+	DefaultSessionPath                     = "session.dat"
 )
 
 // DefaultDatingPrompt is the system prompt for generating dating messages.
@@ -198,25 +203,41 @@ func Load() (*Config, error) {
 		datingReplyAuditLogPath = DefaultDatingReplyAuditLogPath
 	}
 
+	// Dating: Reciprocal-like webhook integration
+	datingMatchWebhookURL, _ := os.LookupEnv("DATING_MATCH_WEBHOOK_URL")
+	datingMatchWebhookToken, _ := os.LookupEnv("DATING_MATCH_WEBHOOK_TOKEN")
+	datingInstanceName, _ := os.LookupEnv("DATING_INSTANCE_NAME")
+
+	datingMatchWebhookTimeout := DefaultDatingMatchWebhookTimeout
+	if v := os.Getenv("DATING_MATCH_WEBHOOK_TIMEOUT"); v != "" {
+		if parsed, err := time.ParseDuration(v); err == nil {
+			datingMatchWebhookTimeout = parsed
+		}
+	}
+
 	return &Config{
-		TGAppID:                 int32(appID),
-		TGAppHash:               appHash,
-		SessionPath:             sessionPath,
-		StringSession:           stringSession,
-		OpenRouterAPIKey:        apiKey,
-		OpenRouterModel:         model,
-		DatingBotChatID:         DefaultDatingBotChatID,
-		DatingBotUsername:       DefaultDatingBotUsername,
-		DatingModel:             datingModel,
-		DatingPrompt:            datingPrompt,
-		DatingMBTIPrompt:        datingMBTIPrompt,
-		DatingMBTIAllowlist:     datingMBTIAllowlist,
-		DatingActionDelay:       datingActionDelay,
-		DatingJitterDelay:       datingJitterDelay,
-		DatingTemperature:       datingTemperature,
-		DatingSkipLowQuality:    datingSkipLowQuality,
-		DatingMinBioLength:      datingMinBioLength,
-		DatingReplyAuditLogPath: datingReplyAuditLogPath,
+		TGAppID:                   int32(appID),
+		TGAppHash:                 appHash,
+		SessionPath:               sessionPath,
+		StringSession:             stringSession,
+		OpenRouterAPIKey:          apiKey,
+		OpenRouterModel:           model,
+		DatingBotChatID:           DefaultDatingBotChatID,
+		DatingBotUsername:         DefaultDatingBotUsername,
+		DatingModel:               datingModel,
+		DatingPrompt:              datingPrompt,
+		DatingMBTIPrompt:          datingMBTIPrompt,
+		DatingMBTIAllowlist:       datingMBTIAllowlist,
+		DatingActionDelay:         datingActionDelay,
+		DatingJitterDelay:         datingJitterDelay,
+		DatingTemperature:         datingTemperature,
+		DatingSkipLowQuality:      datingSkipLowQuality,
+		DatingMinBioLength:        datingMinBioLength,
+		DatingReplyAuditLogPath:   datingReplyAuditLogPath,
+		DatingMatchWebhookURL:     datingMatchWebhookURL,
+		DatingMatchWebhookToken:   datingMatchWebhookToken,
+		DatingMatchWebhookTimeout: datingMatchWebhookTimeout,
+		DatingInstanceName:        datingInstanceName,
 	}, nil
 }
 

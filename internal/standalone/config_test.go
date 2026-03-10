@@ -155,6 +155,18 @@ func TestLoadDatingDefaults(t *testing.T) {
 	if cfg.DatingReplyAuditLogPath != DefaultDatingReplyAuditLogPath {
 		t.Errorf("DatingReplyAuditLogPath = %q, want %q", cfg.DatingReplyAuditLogPath, DefaultDatingReplyAuditLogPath)
 	}
+	if cfg.DatingMatchWebhookURL != "" {
+		t.Errorf("DatingMatchWebhookURL = %q, want empty", cfg.DatingMatchWebhookURL)
+	}
+	if cfg.DatingMatchWebhookToken != "" {
+		t.Errorf("DatingMatchWebhookToken = %q, want empty", cfg.DatingMatchWebhookToken)
+	}
+	if cfg.DatingMatchWebhookTimeout != DefaultDatingMatchWebhookTimeout {
+		t.Errorf("DatingMatchWebhookTimeout = %v, want %v", cfg.DatingMatchWebhookTimeout, DefaultDatingMatchWebhookTimeout)
+	}
+	if cfg.DatingInstanceName != "" {
+		t.Errorf("DatingInstanceName = %q, want empty", cfg.DatingInstanceName)
+	}
 	if cfg.DatingSkipLowQuality != false {
 		t.Errorf("DatingSkipLowQuality = %v, want false", cfg.DatingSkipLowQuality)
 	}
@@ -175,6 +187,10 @@ func TestLoadDatingCustomValues(t *testing.T) {
 	t.Setenv("DATING_SKIP_LOW_QUALITY", "true")
 	t.Setenv("DATING_MIN_BIO_LENGTH", "100")
 	t.Setenv("DATING_REPLY_AUDIT_LOG_PATH", "/tmp/replies-custom.jsonl")
+	t.Setenv("DATING_MATCH_WEBHOOK_URL", "https://example.com/hook")
+	t.Setenv("DATING_MATCH_WEBHOOK_TOKEN", "secret-token")
+	t.Setenv("DATING_MATCH_WEBHOOK_TIMEOUT", "2s")
+	t.Setenv("DATING_INSTANCE_NAME", "prod-a")
 
 	cfg, err := Load()
 	if err != nil {
@@ -215,6 +231,18 @@ func TestLoadDatingCustomValues(t *testing.T) {
 	if cfg.DatingReplyAuditLogPath != "/tmp/replies-custom.jsonl" {
 		t.Errorf("DatingReplyAuditLogPath = %q, want %q", cfg.DatingReplyAuditLogPath, "/tmp/replies-custom.jsonl")
 	}
+	if cfg.DatingMatchWebhookURL != "https://example.com/hook" {
+		t.Errorf("DatingMatchWebhookURL = %q, want %q", cfg.DatingMatchWebhookURL, "https://example.com/hook")
+	}
+	if cfg.DatingMatchWebhookToken != "secret-token" {
+		t.Errorf("DatingMatchWebhookToken = %q, want %q", cfg.DatingMatchWebhookToken, "secret-token")
+	}
+	if cfg.DatingMatchWebhookTimeout != 2*time.Second {
+		t.Errorf("DatingMatchWebhookTimeout = %v, want 2s", cfg.DatingMatchWebhookTimeout)
+	}
+	if cfg.DatingInstanceName != "prod-a" {
+		t.Errorf("DatingInstanceName = %q, want %q", cfg.DatingInstanceName, "prod-a")
+	}
 }
 
 func TestLoadDatingReplyAuditLogPathExplicitEmpty(t *testing.T) {
@@ -228,6 +256,38 @@ func TestLoadDatingReplyAuditLogPathExplicitEmpty(t *testing.T) {
 
 	if cfg.DatingReplyAuditLogPath != "" {
 		t.Errorf("DatingReplyAuditLogPath = %q, want empty string", cfg.DatingReplyAuditLogPath)
+	}
+}
+
+func TestLoadDatingMatchWebhookExplicitEmptyURL(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("DATING_MATCH_WEBHOOK_URL", "")
+	t.Setenv("DATING_MATCH_WEBHOOK_TOKEN", "secret-token")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.DatingMatchWebhookURL != "" {
+		t.Errorf("DatingMatchWebhookURL = %q, want empty string", cfg.DatingMatchWebhookURL)
+	}
+	if cfg.DatingMatchWebhookToken != "secret-token" {
+		t.Errorf("DatingMatchWebhookToken = %q, want %q", cfg.DatingMatchWebhookToken, "secret-token")
+	}
+}
+
+func TestLoadDatingMatchWebhookTimeoutInvalidFallsBackToDefault(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("DATING_MATCH_WEBHOOK_TIMEOUT", "not-a-duration")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.DatingMatchWebhookTimeout != DefaultDatingMatchWebhookTimeout {
+		t.Errorf("DatingMatchWebhookTimeout = %v, want %v", cfg.DatingMatchWebhookTimeout, DefaultDatingMatchWebhookTimeout)
 	}
 }
 

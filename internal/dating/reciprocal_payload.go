@@ -14,15 +14,15 @@ const reciprocalLikeFinalEventType = "reciprocal_like_final"
 var telegramContactURLPattern = regexp.MustCompile(`(?i)(https?://)?(?:www\.)?(?:t\.me|telegram\.me)/[^\s]+`)
 
 type ReciprocalLikeFinalPayload struct {
-	EventType         string
-	RawContactURL     string
-	ContactUsername   string
-	DeeplinkText      string
-	ProfileText       string
-	OpenerText        string
-	MBTI              string
-	ContextCapturedAt time.Time
-	EventTimestamp    time.Time
+	EventType         string    `json:"event_type"`
+	RawContactURL     string    `json:"raw_contact_url"`
+	ContactUsername   string    `json:"contact_username"`
+	DeeplinkText      string    `json:"deeplink_text,omitempty"`
+	ProfileText       string    `json:"profile_text,omitempty"`
+	OpenerText        string    `json:"opener_text,omitempty"`
+	MBTI              string    `json:"mbti,omitempty"`
+	ContextCapturedAt time.Time `json:"context_captured_at,omitempty"`
+	EventTimestamp    time.Time `json:"event_timestamp"`
 }
 
 func isStartChattingMessage(text string) bool {
