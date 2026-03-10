@@ -4,6 +4,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/amarnathcjd/gogram/telegram"
 )
 
 func TestStateMachinePauseLifecycle(t *testing.T) {
@@ -524,5 +526,44 @@ func TestStateMachineLatestVisibleProfileCardTTLExpiry(t *testing.T) {
 
 	if _, ok := sm.GetLatestVisibleProfileCardBefore(210, now.Add(visibleProfileCardTTL+time.Nanosecond)); ok {
 		t.Fatal("GetLatestVisibleProfileCardBefore() ok=true after TTL expiry, want false")
+	}
+}
+
+func TestStateMachineVisibleProfileCardRemembersMessageMediaSource(t *testing.T) {
+	sm := NewStateMachine()
+	now := time.Unix(12000, 0)
+	msg := &telegram.NewMessage{Message: &telegram.MessageObj{ID: 321}}
+
+	sm.RememberVisibleProfileMessage("profile with photo", 321, msg, now)
+
+	entry, ok := sm.GetLatestVisibleProfileCardBefore(400, now.Add(time.Second))
+	if !ok {
+		t.Fatal("GetLatestVisibleProfileCardBefore() ok=false, want true")
+	}
+	if entry.MediaSource.Message != msg {
+		t.Fatal("visible profile media source message not preserved")
+	}
+	if len(entry.MediaSource.AlbumMessages) != 0 {
+		t.Fatalf("album source len = %d, want 0", len(entry.MediaSource.AlbumMessages))
+	}
+}
+
+func TestStateMachineVisibleProfileCardRemembersAlbumMediaSource(t *testing.T) {
+	sm := NewStateMachine()
+	now := time.Unix(13000, 0)
+	msg1 := &telegram.NewMessage{Message: &telegram.MessageObj{ID: 11}}
+	msg2 := &telegram.NewMessage{Message: &telegram.MessageObj{ID: 12}}
+
+	sm.RememberVisibleProfileAlbum("profile album", 12, []*telegram.NewMessage{msg1, msg2}, now)
+
+	entry, ok := sm.GetLatestVisibleProfileCardBefore(500, now.Add(time.Second))
+	if !ok {
+		t.Fatal("GetLatestVisibleProfileCardBefore() ok=false, want true")
+	}
+	if entry.MediaSource.Message != nil {
+		t.Fatal("single message source should be nil for album")
+	}
+	if len(entry.MediaSource.AlbumMessages) != 2 {
+		t.Fatalf("album source len = %d, want 2", len(entry.MediaSource.AlbumMessages))
 	}
 }

@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strings"
 
@@ -49,21 +51,35 @@ func NewReciprocalLikeFinalWebhookClient(cfg *standalone.Config) (*ReciprocalLik
 	}, nil
 }
 
-func (c *ReciprocalLikeFinalWebhookClient) DeliverReciprocalLikeFinal(ctx context.Context, payload ReciprocalLikeFinalPayload) error {
+func (c *ReciprocalLikeFinalWebhookClient) DeliverReciprocalLikeFinal(ctx context.Context, payload ReciprocalLikeFinalPayload, photos []ReciprocalLikePhoto) error {
 	if c == nil {
 		return fmt.Errorf("webhook client is nil")
 	}
 
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal reciprocal-like payload: %w", err)
+	var (
+		body        []byte
+		contentType string
+		err         error
+	)
+
+	if len(photos) > 0 {
+		body, contentType, err = marshalReciprocalLikeFinalMultipartBody(payload, photos)
+		if err != nil {
+			return err
+		}
+	} else {
+		body, err = json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("marshal reciprocal-like payload: %w", err)
+		}
+		contentType = "application/json"
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build webhook request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", contentType)
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
@@ -89,4 +105,56 @@ func (c *ReciprocalLikeFinalWebhookClient) DeliverReciprocalLikeFinal(ctx contex
 	}
 
 	return fmt.Errorf("webhook returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+}
+
+func marshalReciprocalLikeFinalMultipartBody(payload ReciprocalLikeFinalPayload, photos []ReciprocalLikePhoto) ([]byte, string, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, "", fmt.Errorf("marshal reciprocal-like payload: %w", err)
+	}
+	if err := writer.WriteField("payload", string(payloadBytes)); err != nil {
+		return nil, "", fmt.Errorf("write multipart payload field: %w", err)
+	}
+
+	added := 0
+	for idx, photo := range photos {
+		if added >= maxReciprocalLikePhotos {
+			break
+		}
+		if len(photo.Data) == 0 {
+			continue
+		}
+
+		fileName := strings.TrimSpace(photo.FileName)
+		if fileName == "" {
+			fileName = fmt.Sprintf("photo_%02d.jpg", idx+1)
+		}
+
+		contentType := strings.TrimSpace(photo.ContentType)
+		if contentType == "" {
+			contentType = http.DetectContentType(photo.Data)
+		}
+
+		headers := make(textproto.MIMEHeader)
+		headers.Set("Content-Disposition", fmt.Sprintf(`form-data; name="photos"; filename=%q`, fileName))
+		headers.Set("Content-Type", contentType)
+
+		part, err := writer.CreatePart(headers)
+		if err != nil {
+			return nil, "", fmt.Errorf("create multipart photo part: %w", err)
+		}
+		if _, err := part.Write(photo.Data); err != nil {
+			return nil, "", fmt.Errorf("write multipart photo part: %w", err)
+		}
+		added++
+	}
+
+	if err := writer.Close(); err != nil {
+		return nil, "", fmt.Errorf("close multipart writer: %w", err)
+	}
+
+	return body.Bytes(), writer.FormDataContentType(), nil
 }

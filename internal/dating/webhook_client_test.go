@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -82,7 +83,7 @@ func TestReciprocalLikeFinalWebhookClientDeliverSuccess(t *testing.T) {
 		EventTimestamp:  time.Unix(1710000000, 0).UTC(),
 	}
 
-	if err := client.DeliverReciprocalLikeFinal(context.Background(), payload); err != nil {
+	if err := client.DeliverReciprocalLikeFinal(context.Background(), payload, nil); err != nil {
 		t.Fatalf("DeliverReciprocalLikeFinal() error = %v, want nil", err)
 	}
 	select {
@@ -124,7 +125,7 @@ func TestReciprocalLikeFinalWebhookClientDeliverNon2xx(t *testing.T) {
 		RawContactURL:   "https://t.me/test_user",
 		ContactUsername: "test_user",
 		EventTimestamp:  time.Unix(1710000000, 0).UTC(),
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("DeliverReciprocalLikeFinal() error = nil, want non-2xx error")
 	}
@@ -144,5 +145,120 @@ func TestNewReciprocalLikeFinalWebhookClientUsesDefaultTimeout(t *testing.T) {
 
 	if client.httpClient.Timeout != standalone.DefaultDatingMatchWebhookTimeout {
 		t.Fatalf("http timeout = %v, want %v", client.httpClient.Timeout, standalone.DefaultDatingMatchWebhookTimeout)
+	}
+}
+
+func TestReciprocalLikeFinalWebhookClientDeliverMultipartWithPhotos(t *testing.T) {
+	type requestCapture struct {
+		authHeader     string
+		instanceHeader string
+		contentType    string
+		payload        ReciprocalLikeFinalPayload
+		fileCount      int
+		fileNames      []string
+	}
+
+	var captured requestCapture
+	handlerErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.authHeader = r.Header.Get("Authorization")
+		captured.instanceHeader = r.Header.Get(datingInstanceHeader)
+		captured.contentType = r.Header.Get("Content-Type")
+
+		if err := r.ParseMultipartForm(2 << 20); err != nil {
+			select {
+			case handlerErrCh <- fmt.Errorf("ParseMultipartForm: %w", err):
+			default:
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		payloadField := strings.TrimSpace(r.FormValue("payload"))
+		if payloadField == "" {
+			select {
+			case handlerErrCh <- fmt.Errorf("missing payload form field"):
+			default:
+			}
+		}
+
+		if err := json.Unmarshal([]byte(payloadField), &captured.payload); err != nil {
+			select {
+			case handlerErrCh <- fmt.Errorf("payload JSON decode: %w", err):
+			default:
+			}
+		}
+
+		files := r.MultipartForm.File["photos"]
+		captured.fileCount = len(files)
+		captured.fileNames = make([]string, 0, len(files))
+		for _, fh := range files {
+			captured.fileNames = append(captured.fileNames, fh.Filename)
+			f, err := fh.Open()
+			if err != nil {
+				select {
+				case handlerErrCh <- fmt.Errorf("open multipart file: %w", err):
+				default:
+				}
+				continue
+			}
+			if _, err := io.ReadAll(f); err != nil {
+				select {
+				case handlerErrCh <- fmt.Errorf("read multipart file: %w", err):
+				default:
+				}
+			}
+			_ = f.Close()
+		}
+
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	client, err := NewReciprocalLikeFinalWebhookClient(&standalone.Config{
+		DatingMatchWebhookURL:     server.URL,
+		DatingMatchWebhookToken:   "token-photos",
+		DatingMatchWebhookTimeout: 2 * time.Second,
+		DatingInstanceName:        "instance-media",
+	})
+	if err != nil {
+		t.Fatalf("NewReciprocalLikeFinalWebhookClient() error = %v", err)
+	}
+
+	payload := ReciprocalLikeFinalPayload{
+		EventType:       reciprocalLikeFinalEventType,
+		RawContactURL:   "https://t.me/photo_user",
+		ContactUsername: "photo_user",
+		EventTimestamp:  time.Unix(1710000001, 0).UTC(),
+	}
+	photos := []ReciprocalLikePhoto{
+		{FileName: "photo1.jpg", ContentType: "image/jpeg", Data: []byte{0x01, 0x02, 0x03}},
+		{FileName: "photo2.jpg", ContentType: "image/jpeg", Data: []byte{0x04, 0x05, 0x06}},
+	}
+
+	if err := client.DeliverReciprocalLikeFinal(context.Background(), payload, photos); err != nil {
+		t.Fatalf("DeliverReciprocalLikeFinal() error = %v, want nil", err)
+	}
+
+	select {
+	case handlerErr := <-handlerErrCh:
+		t.Fatal(handlerErr)
+	default:
+	}
+
+	if !strings.HasPrefix(captured.contentType, "multipart/form-data;") {
+		t.Fatalf("Content-Type = %q, want multipart/form-data", captured.contentType)
+	}
+	if captured.authHeader != "Bearer token-photos" {
+		t.Fatalf("Authorization header = %q, want %q", captured.authHeader, "Bearer token-photos")
+	}
+	if captured.instanceHeader != "instance-media" {
+		t.Fatalf("%s header = %q, want %q", datingInstanceHeader, captured.instanceHeader, "instance-media")
+	}
+	if captured.payload.ContactUsername != "photo_user" {
+		t.Fatalf("payload.ContactUsername = %q, want %q", captured.payload.ContactUsername, "photo_user")
+	}
+	if captured.fileCount != 2 {
+		t.Fatalf("multipart photo files = %d, want 2", captured.fileCount)
 	}
 }

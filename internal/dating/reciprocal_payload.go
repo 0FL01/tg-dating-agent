@@ -10,6 +10,7 @@ import (
 )
 
 const reciprocalLikeFinalEventType = "reciprocal_like_final"
+const maxReciprocalLikePhotos = 10
 
 var telegramContactURLPattern = regexp.MustCompile(`(?i)(https?://)?(?:www\.)?(?:t\.me|telegram\.me)/[^\s]+`)
 
@@ -23,6 +24,12 @@ type ReciprocalLikeFinalPayload struct {
 	MBTI              string    `json:"mbti,omitempty"`
 	ContextCapturedAt time.Time `json:"context_captured_at,omitempty"`
 	EventTimestamp    time.Time `json:"event_timestamp"`
+}
+
+type ReciprocalLikePhoto struct {
+	FileName    string
+	ContentType string
+	Data        []byte
 }
 
 func isStartChattingMessage(text string) bool {

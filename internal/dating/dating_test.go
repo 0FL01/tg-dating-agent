@@ -2258,10 +2258,12 @@ func TestHandleStartChattingAssemblesReciprocalFinalPayloadNonTerminal(t *testin
 	var (
 		deliverCalls int
 		gotPayload   ReciprocalLikeFinalPayload
+		gotPhotos    []ReciprocalLikePhoto
 	)
-	h.deliverReciprocalLikeFinalFn = func(_ context.Context, payload ReciprocalLikeFinalPayload) error {
+	h.deliverReciprocalLikeFinalFn = func(_ context.Context, payload ReciprocalLikeFinalPayload, photos []ReciprocalLikePhoto) error {
 		deliverCalls++
 		gotPayload = payload
+		gotPhotos = photos
 		return nil
 	}
 
@@ -2295,6 +2297,9 @@ func TestHandleStartChattingAssemblesReciprocalFinalPayloadNonTerminal(t *testin
 	if !gotPayload.EventTimestamp.Equal(time.Unix(1710001100, 0)) {
 		t.Fatalf("payload.EventTimestamp = %v, want %v", gotPayload.EventTimestamp, time.Unix(1710001100, 0))
 	}
+	if len(gotPhotos) != 0 {
+		t.Fatalf("delivered photos len = %d, want 0 without visible media source", len(gotPhotos))
+	}
 
 	if got := h.state.GetState(); got != StateViewingProfiles {
 		t.Fatalf("state after Handle(start chatting) = %v, want %v", got, StateViewingProfiles)
@@ -2312,7 +2317,7 @@ func TestHandleStartChattingWithoutURLFailsGracefullyAndStaysNonTerminal(t *test
 	h.state.SetState(StateViewingProfiles)
 
 	deliverCalled := false
-	h.deliverReciprocalLikeFinalFn = func(_ context.Context, _ ReciprocalLikeFinalPayload) error {
+	h.deliverReciprocalLikeFinalFn = func(_ context.Context, _ ReciprocalLikeFinalPayload, _ []ReciprocalLikePhoto) error {
 		deliverCalled = true
 		return nil
 	}
@@ -2342,7 +2347,7 @@ func TestHandleStartChattingDeliveryErrorIsSwallowedAndNonTerminal(t *testing.T)
 	h.state.SetState(StateViewingProfiles)
 
 	deliverCalls := 0
-	h.deliverReciprocalLikeFinalFn = func(_ context.Context, _ ReciprocalLikeFinalPayload) error {
+	h.deliverReciprocalLikeFinalFn = func(_ context.Context, _ ReciprocalLikeFinalPayload, _ []ReciprocalLikePhoto) error {
 		deliverCalls++
 		return errors.New("webhook unavailable")
 	}

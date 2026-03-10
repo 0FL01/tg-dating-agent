@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -45,7 +47,7 @@ type Handler struct {
 	clickButtonFn                func(context.Context, string) error
 	sendMessageFn                func(context.Context, telegram.InputPeer, string) error
 	sendSleepFn                  func(context.Context) error
-	deliverReciprocalLikeFinalFn func(context.Context, ReciprocalLikeFinalPayload) error
+	deliverReciprocalLikeFinalFn func(context.Context, ReciprocalLikeFinalPayload, []ReciprocalLikePhoto) error
 	botPeerMu                    sync.RWMutex
 	botPeer                      telegram.InputPeer
 	lifecycleMu                  sync.Mutex
@@ -218,7 +220,7 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 			}
 			return nil
 		}
-		h.rememberVisibleProfileCard(m.Text(), m.ID)
+		h.rememberVisibleProfileMessage(m.Text(), m.ID, m)
 		if !h.state.Enqueue(ProfileJob{Type: "message", Message: m, ProfileMessageID: m.ID}) {
 			log.Printf("[%s] Queue full, skipping profile", h.Name())
 		} else {
@@ -317,13 +319,18 @@ func (h *Handler) handleReciprocalLikePrompt(m *telegram.NewMessage) error {
 }
 
 func (h *Handler) handleReciprocalLikeFinalMessage(m *telegram.NewMessage) error {
-	payload, ok := h.BuildReciprocalLikeFinalPayload(m, time.Now())
+	now := time.Now()
+	latest, hasContext := h.state.GetLatestReciprocalLikeContext(now)
+	visibleProfile, hasVisibleProfile := h.state.GetLatestVisibleProfileCardBefore(messageIDFromMessage(m), now)
+	payload, ok := buildReciprocalLikeFinalPayload(m, visibleProfile, hasVisibleProfile, latest, hasContext, now)
 	if !ok {
 		log.Printf("[%s] Start chatting message detected, but payload assembly failed (no valid Telegram contact URL)", h.Name())
 		return nil
 	}
 
-	if err := h.deliverReciprocalLikeFinalPayload(h.lifecycleContext(), payload); err != nil {
+	photos := h.collectReciprocalLikePhotos(h.lifecycleContext(), visibleProfile, hasVisibleProfile)
+
+	if err := h.deliverReciprocalLikeFinalPayload(h.lifecycleContext(), payload, photos); err != nil {
 		log.Printf("[%s] Reciprocal-like final payload handling failed: %v", h.Name(), err)
 		return nil
 	}
@@ -331,13 +338,13 @@ func (h *Handler) handleReciprocalLikeFinalMessage(m *telegram.NewMessage) error
 	return nil
 }
 
-func (h *Handler) deliverReciprocalLikeFinalPayload(ctx context.Context, payload ReciprocalLikeFinalPayload) error {
+func (h *Handler) deliverReciprocalLikeFinalPayload(ctx context.Context, payload ReciprocalLikeFinalPayload, photos []ReciprocalLikePhoto) error {
 	if h.deliverReciprocalLikeFinalFn != nil {
-		return h.deliverReciprocalLikeFinalFn(ctx, payload)
+		return h.deliverReciprocalLikeFinalFn(ctx, payload, photos)
 	}
 
-	log.Printf("[%s] Reciprocal-like final payload assembled: username=%q url=%q context=%t",
-		h.Name(), payload.ContactUsername, payload.RawContactURL, !payload.ContextCapturedAt.IsZero())
+	log.Printf("[%s] Reciprocal-like final payload assembled: username=%q url=%q context=%t photos=%d",
+		h.Name(), payload.ContactUsername, payload.RawContactURL, !payload.ContextCapturedAt.IsZero(), len(photos))
 	return nil
 }
 
@@ -1003,7 +1010,7 @@ func (h *Handler) HandleAlbum(a *telegram.Album) error {
 	}
 
 	if profileText, messageID, ok := visibleProfileCardFromAlbum(a); ok {
-		h.rememberVisibleProfileCard(profileText, messageID)
+		h.rememberVisibleProfileAlbum(profileText, messageID, a.Messages)
 	}
 
 	// Add to queue instead of direct processing
@@ -1194,6 +1201,88 @@ func (h *Handler) rememberGroupedCaption(m *telegram.NewMessage, text string) {
 
 func (h *Handler) rememberVisibleProfileCard(profileText string, messageID int32) {
 	h.state.RememberVisibleProfileCard(profileText, messageID, time.Now())
+}
+
+func (h *Handler) rememberVisibleProfileMessage(profileText string, messageID int32, m *telegram.NewMessage) {
+	h.state.RememberVisibleProfileMessage(profileText, messageID, m, time.Now())
+}
+
+func (h *Handler) rememberVisibleProfileAlbum(profileText string, messageID int32, messages []*telegram.NewMessage) {
+	h.state.RememberVisibleProfileAlbum(profileText, messageID, messages, time.Now())
+}
+
+func (h *Handler) collectReciprocalLikePhotos(ctx context.Context, visibleProfile RecentVisibleProfileCard, hasVisibleProfile bool) []ReciprocalLikePhoto {
+	if !hasVisibleProfile {
+		return nil
+	}
+
+	sourceMessages := reciprocalLikePhotoSourceMessages(visibleProfile.MediaSource)
+	if len(sourceMessages) == 0 {
+		return nil
+	}
+
+	photos := make([]ReciprocalLikePhoto, 0, minInt(len(sourceMessages), maxReciprocalLikePhotos))
+	for sourceIndex, msg := range sourceMessages {
+		if len(photos) >= maxReciprocalLikePhotos {
+			break
+		}
+		if msg == nil || msg.Photo() == nil {
+			continue
+		}
+
+		photoPath, err := tghelper.RetryTelegram(ctx, "download_reciprocal_photo", func() (string, error) {
+			return msg.Download(&telegram.DownloadOptions{FileName: writableTempDownloadDir()})
+		})
+		if err != nil || strings.TrimSpace(photoPath) == "" {
+			log.Printf("[%s] Failed to download reciprocal-like photo attachment: %v", h.Name(), err)
+			continue
+		}
+
+		data, readErr := os.ReadFile(photoPath)
+		tghelper.CleanupFile(photoPath, nil, h.Name())
+		if readErr != nil {
+			log.Printf("[%s] Failed to read reciprocal-like photo attachment %q: %v", h.Name(), photoPath, readErr)
+			continue
+		}
+		if len(data) == 0 {
+			continue
+		}
+
+		photos = append(photos, ReciprocalLikePhoto{
+			FileName:    reciprocalLikePhotoFilename(photoPath, len(photos), sourceIndex),
+			ContentType: http.DetectContentType(data),
+			Data:        data,
+		})
+	}
+
+	return photos
+}
+
+func reciprocalLikePhotoSourceMessages(source RecentVisibleProfileMediaSource) []*telegram.NewMessage {
+	if len(source.AlbumMessages) > 0 {
+		return append([]*telegram.NewMessage(nil), source.AlbumMessages...)
+	}
+	if source.Message == nil {
+		return nil
+	}
+	return []*telegram.NewMessage{source.Message}
+}
+
+func reciprocalLikePhotoFilename(path string, photoIndex int, sourceIndex int) string {
+	base := strings.TrimSpace(filepath.Base(path))
+	if base != "" && base != "." && base != string(filepath.Separator) {
+		return base
+	}
+
+	return fmt.Sprintf("profile_photo_%02d_%02d.jpg", photoIndex+1, sourceIndex+1)
+}
+
+func minInt(left int, right int) int {
+	if left < right {
+		return left
+	}
+
+	return right
 }
 
 func shouldStopWorker(ctx context.Context, quit <-chan struct{}) bool {

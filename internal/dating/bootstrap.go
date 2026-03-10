@@ -32,8 +32,8 @@ func NewStandaloneHandler(cfg *standalone.Config, tgClient *telegram.Client) *Ha
 	}
 
 	if webhookClient != nil {
-		handler.deliverReciprocalLikeFinalFn = func(ctx context.Context, payload ReciprocalLikeFinalPayload) error {
-			return webhookClient.DeliverReciprocalLikeFinal(ctx, payload)
+		handler.deliverReciprocalLikeFinalFn = func(ctx context.Context, payload ReciprocalLikeFinalPayload, photos []ReciprocalLikePhoto) error {
+			return webhookClient.DeliverReciprocalLikeFinal(ctx, payload, photos)
 		}
 	}
 

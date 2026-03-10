@@ -99,6 +99,12 @@ type RecentVisibleProfileCard struct {
 	ProfileText string
 	MessageID   int32
 	CapturedAt  time.Time
+	MediaSource RecentVisibleProfileMediaSource
+}
+
+type RecentVisibleProfileMediaSource struct {
+	Message       *telegram.NewMessage
+	AlbumMessages []*telegram.NewMessage
 }
 
 type profileLLMCacheEntry struct {
@@ -404,6 +410,19 @@ func (sm *StateMachine) BeginShutdown() {
 }
 
 func (sm *StateMachine) RememberVisibleProfileCard(profileText string, messageID int32, now time.Time) {
+	sm.rememberVisibleProfileCard(profileText, messageID, RecentVisibleProfileMediaSource{}, now)
+}
+
+func (sm *StateMachine) RememberVisibleProfileMessage(profileText string, messageID int32, message *telegram.NewMessage, now time.Time) {
+	sm.rememberVisibleProfileCard(profileText, messageID, RecentVisibleProfileMediaSource{Message: message}, now)
+}
+
+func (sm *StateMachine) RememberVisibleProfileAlbum(profileText string, messageID int32, messages []*telegram.NewMessage, now time.Time) {
+	albumMessages := append([]*telegram.NewMessage(nil), messages...)
+	sm.rememberVisibleProfileCard(profileText, messageID, RecentVisibleProfileMediaSource{AlbumMessages: albumMessages}, now)
+}
+
+func (sm *StateMachine) rememberVisibleProfileCard(profileText string, messageID int32, source RecentVisibleProfileMediaSource, now time.Time) {
 	trimmedProfileText := strings.TrimSpace(profileText)
 	if trimmedProfileText == "" {
 		return
@@ -420,6 +439,7 @@ func (sm *StateMachine) RememberVisibleProfileCard(profileText string, messageID
 		ProfileText: trimmedProfileText,
 		MessageID:   messageID,
 		CapturedAt:  now,
+		MediaSource: source,
 	}
 }
 
@@ -440,7 +460,9 @@ func (sm *StateMachine) GetLatestVisibleProfileCardBefore(messageID int32, now t
 		return RecentVisibleProfileCard{}, false
 	}
 
-	return sm.visibleProfileCard, true
+	entry := sm.visibleProfileCard
+	entry.MediaSource.AlbumMessages = append([]*telegram.NewMessage(nil), entry.MediaSource.AlbumMessages...)
+	return entry, true
 }
 
 func (sm *StateMachine) pruneVisibleProfileCardLocked(now time.Time) {
