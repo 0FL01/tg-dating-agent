@@ -3,6 +3,9 @@
 package dating
 
 import (
+	"context"
+	"log"
+
 	"github.com/0FL01/tg-dating-agent/internal/llm"
 	"github.com/0FL01/tg-dating-agent/internal/standalone"
 	"github.com/amarnathcjd/gogram/telegram"
@@ -20,5 +23,19 @@ import (
 //	handler := dating.NewStandaloneHandler(cfg, tgClient)
 func NewStandaloneHandler(cfg *standalone.Config, tgClient *telegram.Client) *Handler {
 	client := llm.NewClient(cfg.OpenRouterAPIKey)
-	return NewHandler(cfg, client, tgClient)
+	handler := NewHandler(cfg, client, tgClient)
+
+	webhookClient, err := NewReciprocalLikeFinalWebhookClient(cfg)
+	if err != nil {
+		log.Printf("[dating] Reciprocal-like webhook disabled: %v", err)
+		return handler
+	}
+
+	if webhookClient != nil {
+		handler.deliverReciprocalLikeFinalFn = func(ctx context.Context, payload ReciprocalLikeFinalPayload) error {
+			return webhookClient.DeliverReciprocalLikeFinal(ctx, payload)
+		}
+	}
+
+	return handler
 }

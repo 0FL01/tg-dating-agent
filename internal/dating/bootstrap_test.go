@@ -1,6 +1,10 @@
 package dating
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/0FL01/tg-dating-agent/internal/standalone"
@@ -132,5 +136,78 @@ func TestNewStandaloneHandler_Filter(t *testing.T) {
 				t.Error("handler.Filter() returned nil")
 			}
 		})
+	}
+}
+
+func TestNewStandaloneHandler_WebhookDisabledKeepsNoopDelivery(t *testing.T) {
+	cfg := &standalone.Config{
+		OpenRouterAPIKey:      "test-key",
+		DatingBotChatID:       123456789,
+		DatingModel:           "test-model",
+		DatingMBTIAllowlist:   []string{"INTJ"},
+		DatingMatchWebhookURL: "",
+	}
+
+	handler := NewStandaloneHandler(cfg, nil)
+	if handler.deliverReciprocalLikeFinalFn != nil {
+		t.Fatal("deliverReciprocalLikeFinalFn should be nil when webhook URL is empty")
+	}
+
+	err := handler.Handle(&telegram.NewMessage{Message: &telegram.MessageObj{
+		Message: "Start chatting: https://t.me/final_user?text=Hi",
+	}})
+	if err != nil {
+		t.Fatalf("Handle() error = %v, want nil", err)
+	}
+}
+
+func TestNewStandaloneHandler_WebhookEnabledDeliversPayload(t *testing.T) {
+	var calls int32
+	var gotPayload ReciprocalLikeFinalPayload
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		defer func() {
+			_ = r.Body.Close()
+		}()
+
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	cfg := &standalone.Config{
+		OpenRouterAPIKey:        "test-key",
+		DatingBotChatID:         123456789,
+		DatingModel:             "test-model",
+		DatingMBTIAllowlist:     []string{"INTJ"},
+		DatingMatchWebhookURL:   server.URL,
+		DatingMatchWebhookToken: "token",
+	}
+
+	handler := NewStandaloneHandler(cfg, nil)
+	if handler.deliverReciprocalLikeFinalFn == nil {
+		t.Fatal("deliverReciprocalLikeFinalFn should be wired when webhook URL is set")
+	}
+
+	err := handler.Handle(&telegram.NewMessage{Message: &telegram.MessageObj{
+		Message: "It's a match! Start chatting: https://t.me/final_user?text=Hi%20there",
+	}})
+	if err != nil {
+		t.Fatalf("Handle() error = %v, want nil", err)
+	}
+
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("webhook calls = %d, want 1", got)
+	}
+
+	if gotPayload.ContactUsername != "final_user" {
+		t.Fatalf("payload.ContactUsername = %q, want %q", gotPayload.ContactUsername, "final_user")
+	}
+	if gotPayload.DeeplinkText != "Hi there" {
+		t.Fatalf("payload.DeeplinkText = %q, want %q", gotPayload.DeeplinkText, "Hi there")
 	}
 }

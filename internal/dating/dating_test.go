@@ -2083,6 +2083,38 @@ func TestHandleStartChattingWithoutURLFailsGracefullyAndStaysNonTerminal(t *test
 	}
 }
 
+func TestHandleStartChattingDeliveryErrorIsSwallowedAndNonTerminal(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+
+	deliverCalls := 0
+	h.deliverReciprocalLikeFinalFn = func(_ context.Context, _ ReciprocalLikeFinalPayload) error {
+		deliverCalls++
+		return errors.New("webhook unavailable")
+	}
+
+	err := h.Handle(&telegram.NewMessage{Message: &telegram.MessageObj{
+		Message: "Start chatting: https://t.me/final_user?text=Hi",
+	}})
+	if err != nil {
+		t.Fatalf("Handle() error = %v, want nil", err)
+	}
+
+	if deliverCalls != 1 {
+		t.Fatalf("deliverReciprocalLikeFinalFn calls = %d, want 1", deliverCalls)
+	}
+
+	if got := h.state.GetState(); got != StateViewingProfiles {
+		t.Fatalf("state after Handle(start chatting with delivery error) = %v, want %v", got, StateViewingProfiles)
+	}
+
+	select {
+	case <-h.state.ShouldQuit():
+		t.Fatal("quit channel closed for start chatting delivery error")
+	default:
+	}
+}
+
 func TestReciprocalOpenButtonText(t *testing.T) {
 	tests := []struct {
 		name       string
