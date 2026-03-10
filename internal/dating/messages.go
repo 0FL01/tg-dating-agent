@@ -5,7 +5,10 @@ const (
 )
 
 const (
-	PatternLikedYou        = "person liked you"
+	PatternLikedYouPerson  = "person liked you"
+	PatternLikedYouWoman   = "woman liked you"
+	PatternLikedYouMan     = "man liked you"
+	PatternLikedYouPrompt  = "liked you. have a look?"
 	PatternWriteMessage    = "Write a message"
 	PatternViewProfiles    = "View profiles"
 	PatternTooLong         = "message is too long"

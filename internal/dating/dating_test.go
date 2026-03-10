@@ -1887,62 +1887,124 @@ func TestShutdownCancelsInFlightWorkerJobAndKeepsStoppedState(t *testing.T) {
 	}
 }
 
-func TestHandleMatchMessageTriggersFullShutdown(t *testing.T) {
-	summarizer := &blockingSummarizer{
-		started:  make(chan struct{}),
-		canceled: make(chan struct{}),
-		release:  make(chan struct{}),
+func TestIsReciprocalLikePrompt(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{name: "person liked you", text: "A person liked you", want: true},
+		{name: "woman liked you", text: "A woman liked you", want: true},
+		{name: "man liked you", text: "A man liked you", want: true},
+		{name: "have a look prompt", text: "Someone liked you. Have a look?", want: true},
+		{name: "unrelated", text: "view profiles", want: false},
+		{name: "empty", text: "", want: false},
 	}
 
-	h := &Handler{
-		state: NewStateMachine(),
-		config: &standalone.Config{
-			DatingMBTIPrompt:     "mbti",
-			DatingMBTIAllowlist:  []string{"INTJ"},
-			DatingSkipLowQuality: false,
-		},
-		client:      summarizer,
-		model:       "model",
-		prompt:      "prompt",
-		temperature: 0.3,
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isReciprocalLikePrompt(tt.text); got != tt.want {
+				t.Fatalf("isReciprocalLikePrompt(%q) = %v, want %v", tt.text, got, tt.want)
+			}
+		})
 	}
+}
 
-	h.StartWorker()
-	if ok := h.state.Enqueue(ProfileJob{Type: "album", Album: &telegram.Album{Messages: []*telegram.NewMessage{{
-		ID: 1,
-		Message: &telegram.MessageObj{
-			Message: "profile text",
-		},
-	}}}}); !ok {
-		t.Fatal("Enqueue() = false, want true")
-	}
-
-	mustReceiveSignal(t, summarizer.started, "blocking summarizer start")
-
+func TestHandleReciprocalLikePromptDoesNotShutdown(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
 	lifecycleCtx := h.lifecycleContext()
-	err := h.Handle(&telegram.NewMessage{Message: &telegram.MessageObj{Message: "a person liked you"}})
+
+	err := h.Handle(&telegram.NewMessage{Message: &telegram.MessageObj{Message: "A person liked you"}})
 	if err != nil {
 		t.Fatalf("Handle() error = %v, want nil", err)
 	}
 
-	mustReceiveSignal(t, summarizer.canceled, "blocking summarizer cancellation")
-
-	if got := h.state.GetState(); got != StateStopped {
-		t.Fatalf("state after Handle(match) = %v, want %v", got, StateStopped)
+	if got := h.state.GetState(); got != StateViewingProfiles {
+		t.Fatalf("state after Handle(reciprocal) = %v, want %v", got, StateViewingProfiles)
 	}
 
 	select {
 	case <-h.state.ShouldQuit():
-		// expected
+		t.Fatal("quit channel closed for reciprocal-like prompt")
 	default:
-		t.Fatal("quit channel was not closed by match-triggered shutdown")
 	}
 
 	select {
 	case <-lifecycleCtx.Done():
-		// expected
-	case <-time.After(testSyncTimeout):
-		t.Fatal("lifecycle context was not canceled by match-triggered shutdown")
+		t.Fatal("lifecycle context canceled for reciprocal-like prompt")
+	default:
+	}
+}
+
+func TestHandleReciprocalLikePromptWithShowButtonStaysNonTerminal(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+
+	err := h.Handle(&telegram.NewMessage{Message: &telegram.MessageObj{
+		Message: "Someone liked you. Have a look?",
+		ReplyMarkup: &telegram.ReplyKeyboardMarkup{Rows: []*telegram.KeyboardButtonRow{{Buttons: []telegram.KeyboardButton{
+			&telegram.KeyboardButtonObj{Text: ButtonViewProfiles},
+		}}}},
+	}})
+	if err != nil {
+		t.Fatalf("Handle() error = %v, want nil", err)
+	}
+
+	if got := h.state.GetState(); got != StateViewingProfiles {
+		t.Fatalf("state after Handle(reciprocal with button) = %v, want %v", got, StateViewingProfiles)
+	}
+
+	select {
+	case <-h.state.ShouldQuit():
+		t.Fatal("quit channel closed for reciprocal-like prompt with button")
+	default:
+	}
+}
+
+func TestReciprocalOpenButtonText(t *testing.T) {
+	tests := []struct {
+		name       string
+		message    *telegram.NewMessage
+		wantButton string
+		wantOK     bool
+	}{
+		{
+			name: "numeric view button",
+			message: &telegram.NewMessage{Message: &telegram.MessageObj{ReplyMarkup: &telegram.ReplyKeyboardMarkup{Rows: []*telegram.KeyboardButtonRow{{Buttons: []telegram.KeyboardButton{
+				&telegram.KeyboardButtonObj{Text: ButtonViewProfiles},
+			}}}}}},
+			wantButton: ButtonViewProfiles,
+			wantOK:     true,
+		},
+		{
+			name: "show text button",
+			message: &telegram.NewMessage{Message: &telegram.MessageObj{ReplyMarkup: &telegram.ReplyKeyboardMarkup{Rows: []*telegram.KeyboardButtonRow{{Buttons: []telegram.KeyboardButton{
+				&telegram.KeyboardButtonObj{Text: "Show profile"},
+			}}}}}},
+			wantButton: "Show profile",
+			wantOK:     true,
+		},
+		{
+			name: "no matching button",
+			message: &telegram.NewMessage{Message: &telegram.MessageObj{ReplyMarkup: &telegram.ReplyKeyboardMarkup{Rows: []*telegram.KeyboardButtonRow{{Buttons: []telegram.KeyboardButton{
+				&telegram.KeyboardButtonObj{Text: ButtonMyProfile},
+			}}}}}},
+			wantButton: "",
+			wantOK:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotButton, gotOK := reciprocalOpenButtonText(tt.message)
+			if gotOK != tt.wantOK {
+				t.Fatalf("reciprocalOpenButtonText() ok = %v, want %v", gotOK, tt.wantOK)
+			}
+			if gotButton != tt.wantButton {
+				t.Fatalf("reciprocalOpenButtonText() button = %q, want %q", gotButton, tt.wantButton)
+			}
+		})
 	}
 }
 

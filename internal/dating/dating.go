@@ -147,10 +147,8 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 	h.rememberGroupedCaption(m, text)
 	log.Printf("[%s] Received message: %s...", h.Name(), utils.Truncate(text, 50))
 
-	if strings.Contains(strings.ToLower(text), PatternLikedYou) {
-		log.Printf("[%s] Received match notification, stopping", h.Name())
-		h.Shutdown()
-		return nil
+	if isReciprocalLikePrompt(text) {
+		return h.handleReciprocalLikePrompt(m)
 	}
 
 	if isDailyLimitMessage(text) {
@@ -272,6 +270,37 @@ func isMineMessage(text string) bool {
 	}
 
 	return strings.Contains(normalized, PatternMineKeywords)
+}
+
+func isReciprocalLikePrompt(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	if normalized == "" {
+		return false
+	}
+
+	if strings.Contains(normalized, PatternLikedYouPrompt) {
+		return true
+	}
+
+	return strings.Contains(normalized, PatternLikedYouPerson) ||
+		strings.Contains(normalized, PatternLikedYouWoman) ||
+		strings.Contains(normalized, PatternLikedYouMan)
+}
+
+func (h *Handler) handleReciprocalLikePrompt(m *telegram.NewMessage) error {
+	log.Printf("[%s] Received reciprocal-like prompt", h.Name())
+
+	buttonText, ok := reciprocalOpenButtonText(m)
+	if !ok {
+		log.Printf("[%s] Reciprocal-like prompt has no obvious show button, skipping", h.Name())
+		return nil
+	}
+
+	if err := h.clickButtonWithContext(h.lifecycleContext(), buttonText); err != nil {
+		log.Printf("[%s] Failed to open reciprocal-like prompt with button %q: %v", h.Name(), buttonText, err)
+	}
+
+	return nil
 }
 
 func isDailyLimitMessage(text string) bool {

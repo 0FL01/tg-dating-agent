@@ -1,6 +1,10 @@
 package dating
 
-import "github.com/amarnathcjd/gogram/telegram"
+import (
+	"strings"
+
+	"github.com/amarnathcjd/gogram/telegram"
+)
 
 func hasReplyMarkup(m *telegram.NewMessage) bool {
 	if m == nil || m.Message == nil {
@@ -11,13 +15,28 @@ func hasReplyMarkup(m *telegram.NewMessage) bool {
 }
 
 func hasReplyKeyboardButtonText(m *telegram.NewMessage, buttonText string) bool {
-	if m == nil || m.Message == nil || buttonText == "" {
+	if buttonText == "" {
 		return false
+	}
+
+	_, ok := findReplyKeyboardButtonText(m, func(text string) bool {
+		return text == buttonText
+	})
+
+	return ok
+}
+
+func findReplyKeyboardButtonText(m *telegram.NewMessage, match func(string) bool) (string, bool) {
+	if m == nil || m.Message == nil {
+		return "", false
+	}
+	if match == nil {
+		return "", false
 	}
 
 	markup, ok := m.Message.ReplyMarkup.(*telegram.ReplyKeyboardMarkup)
 	if !ok || markup == nil {
-		return false
+		return "", false
 	}
 
 	for _, row := range markup.Rows {
@@ -31,13 +50,28 @@ func hasReplyKeyboardButtonText(m *telegram.NewMessage, buttonText string) bool 
 				continue
 			}
 
-			if obj.Text == buttonText {
-				return true
+			if match(obj.Text) {
+				return obj.Text, true
 			}
 		}
 	}
 
-	return false
+	return "", false
+}
+
+func reciprocalOpenButtonText(m *telegram.NewMessage) (string, bool) {
+	return findReplyKeyboardButtonText(m, func(text string) bool {
+		trimmed := strings.TrimSpace(text)
+		if trimmed == "" {
+			return false
+		}
+
+		if trimmed == ButtonViewProfiles {
+			return true
+		}
+
+		return strings.EqualFold(trimmed, "show") || strings.HasPrefix(strings.ToLower(trimmed), "show ")
+	})
 }
 
 func hasProfileActionKeyboard(m *telegram.NewMessage) bool {
