@@ -333,3 +333,119 @@ func TestStateMachineProfileLLMCacheConcurrentReadWrite(t *testing.T) {
 		t.Fatal("GetProfileLLMCache(shared-profile) ok=false, want true")
 	}
 }
+
+func TestStateMachineRecentReciprocalLikeContextStoreAndGet(t *testing.T) {
+	sm := NewStateMachine()
+	now := time.Unix(7000, 0)
+
+	sm.AddRecentReciprocalLikeContext(RecentReciprocalLikeContext{
+		ProfileText: "bio-1",
+		OpenerText:  "opener-1",
+		MBTI:        "INTJ",
+		Fingerprint: "fp-1",
+		CapturedAt:  now,
+	})
+	sm.AddRecentReciprocalLikeContext(RecentReciprocalLikeContext{
+		ProfileText: "bio-2",
+		OpenerText:  "opener-2",
+		MBTI:        "INFJ",
+		Fingerprint: "fp-2",
+		CapturedAt:  now.Add(time.Second),
+	})
+
+	latest, ok := sm.GetLatestReciprocalLikeContext(now.Add(2 * time.Second))
+	if !ok {
+		t.Fatal("GetLatestReciprocalLikeContext() ok=false, want true")
+	}
+	if latest.ProfileText != "bio-2" || latest.OpenerText != "opener-2" || latest.MBTI != "INFJ" || latest.Fingerprint != "fp-2" {
+		t.Fatalf("latest reciprocal-like context = %+v, want bio-2/opener-2/INFJ/fp-2", latest)
+	}
+
+	list := sm.ListRecentReciprocalLikeContexts(now.Add(2*time.Second), -1)
+	if len(list) != 2 {
+		t.Fatalf("ListRecentReciprocalLikeContexts() len=%d, want 2", len(list))
+	}
+	if list[0].ProfileText != "bio-1" || list[1].ProfileText != "bio-2" {
+		t.Fatalf("ListRecentReciprocalLikeContexts() order = [%q, %q], want [bio-1, bio-2]", list[0].ProfileText, list[1].ProfileText)
+	}
+
+	sm.ClearRecentReciprocalLikeContexts()
+	if got := sm.ListRecentReciprocalLikeContexts(now.Add(2*time.Second), -1); len(got) != 0 {
+		t.Fatalf("ListRecentReciprocalLikeContexts() len after clear=%d, want 0", len(got))
+	}
+}
+
+func TestStateMachineRecentReciprocalLikeContextTTLExpiryLazyPrune(t *testing.T) {
+	sm := NewStateMachine()
+	now := time.Unix(8000, 0)
+
+	sm.AddRecentReciprocalLikeContext(RecentReciprocalLikeContext{
+		ProfileText: "stale",
+		OpenerText:  "stale-opener",
+		CapturedAt:  now,
+	})
+
+	if _, ok := sm.GetLatestReciprocalLikeContext(now.Add(reciprocalLikeContextTTL + time.Nanosecond)); ok {
+		t.Fatal("GetLatestReciprocalLikeContext() ok=true after TTL expiry, want false")
+	}
+
+	if list := sm.ListRecentReciprocalLikeContexts(now.Add(reciprocalLikeContextTTL+2*time.Nanosecond), -1); len(list) != 0 {
+		t.Fatalf("ListRecentReciprocalLikeContexts() len=%d after lazy prune, want 0", len(list))
+	}
+}
+
+func TestStateMachineRecentReciprocalLikeContextEvictsOldestAtLimit(t *testing.T) {
+	sm := NewStateMachine()
+	sm.reciprocalLikeMax = 2
+	now := time.Unix(9000, 0)
+
+	sm.AddRecentReciprocalLikeContext(RecentReciprocalLikeContext{ProfileText: "bio-1", CapturedAt: now})
+	sm.AddRecentReciprocalLikeContext(RecentReciprocalLikeContext{ProfileText: "bio-2", CapturedAt: now.Add(time.Second)})
+	sm.AddRecentReciprocalLikeContext(RecentReciprocalLikeContext{ProfileText: "bio-3", CapturedAt: now.Add(2 * time.Second)})
+
+	list := sm.ListRecentReciprocalLikeContexts(now.Add(3*time.Second), -1)
+	if len(list) != 2 {
+		t.Fatalf("ListRecentReciprocalLikeContexts() len=%d, want 2", len(list))
+	}
+	if list[0].ProfileText != "bio-2" || list[1].ProfileText != "bio-3" {
+		t.Fatalf("eviction result = [%q, %q], want [bio-2, bio-3]", list[0].ProfileText, list[1].ProfileText)
+	}
+}
+
+func TestStateMachineRecentReciprocalLikeContextConcurrentAccess(t *testing.T) {
+	sm := NewStateMachine()
+	sm.reciprocalLikeMax = 32
+
+	const workers = 16
+	const iterations = 200
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				now := time.Now()
+				sm.AddRecentReciprocalLikeContext(RecentReciprocalLikeContext{
+					ProfileText: "profile",
+					OpenerText:  "opener",
+					MBTI:        "INTJ",
+					Fingerprint: "worker",
+					CapturedAt:  now.Add(time.Duration(workerID+j) * time.Millisecond),
+				})
+				sm.GetLatestReciprocalLikeContext(now)
+				sm.ListRecentReciprocalLikeContexts(now, 5)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	list := sm.ListRecentReciprocalLikeContexts(time.Now(), -1)
+	if len(list) == 0 {
+		t.Fatal("ListRecentReciprocalLikeContexts() len=0 after concurrent writes, want >0")
+	}
+	if len(list) > sm.reciprocalLikeMax {
+		t.Fatalf("ListRecentReciprocalLikeContexts() len=%d, want <=%d", len(list), sm.reciprocalLikeMax)
+	}
+}

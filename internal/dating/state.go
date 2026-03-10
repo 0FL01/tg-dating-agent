@@ -71,6 +71,8 @@ type StateMachine struct {
 	profileLLMCache       map[string]profileLLMCacheEntry
 	profileLLMCacheOrder  []string
 	profileLLMCacheMax    int
+	reciprocalLikeContext []RecentReciprocalLikeContext
+	reciprocalLikeMax     int
 }
 
 const ownProfileSkipTTL = 45 * time.Second
@@ -78,6 +80,16 @@ const ownProfileSkipMaxMessageGap int32 = 3
 const groupedCaptionTTL = 2 * time.Minute
 const startupOwnProfileSkipTTL = 90 * time.Second
 const defaultProfileLLMCacheMaxEntries = 1000
+const reciprocalLikeContextTTL = 30 * time.Minute
+const defaultReciprocalLikeContextMaxEntries = 64
+
+type RecentReciprocalLikeContext struct {
+	ProfileText string
+	OpenerText  string
+	MBTI        string
+	Fingerprint string
+	CapturedAt  time.Time
+}
 
 type profileLLMCacheEntry struct {
 	mbti   string
@@ -118,7 +130,81 @@ func NewStateMachine() *StateMachine {
 		groupedCaptions:    make(map[int64]groupedCaptionContext),
 		profileLLMCache:    make(map[string]profileLLMCacheEntry),
 		profileLLMCacheMax: defaultProfileLLMCacheMaxEntries,
+		reciprocalLikeMax:  defaultReciprocalLikeContextMaxEntries,
 	}
+}
+
+func (sm *StateMachine) AddRecentReciprocalLikeContext(entry RecentReciprocalLikeContext) {
+	if entry.CapturedAt.IsZero() {
+		entry.CapturedAt = time.Now()
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.pruneReciprocalLikeContextLocked(entry.CapturedAt)
+	sm.reciprocalLikeContext = append(sm.reciprocalLikeContext, entry)
+
+	if len(sm.reciprocalLikeContext) <= sm.reciprocalLikeMax {
+		return
+	}
+
+	overflow := len(sm.reciprocalLikeContext) - sm.reciprocalLikeMax
+	sm.reciprocalLikeContext = append([]RecentReciprocalLikeContext(nil), sm.reciprocalLikeContext[overflow:]...)
+}
+
+func (sm *StateMachine) GetLatestReciprocalLikeContext(now time.Time) (RecentReciprocalLikeContext, bool) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.pruneReciprocalLikeContextLocked(now)
+	if len(sm.reciprocalLikeContext) == 0 {
+		return RecentReciprocalLikeContext{}, false
+	}
+
+	latest := sm.reciprocalLikeContext[len(sm.reciprocalLikeContext)-1]
+	return latest, true
+}
+
+func (sm *StateMachine) ListRecentReciprocalLikeContexts(now time.Time, limit int) []RecentReciprocalLikeContext {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.pruneReciprocalLikeContextLocked(now)
+	if len(sm.reciprocalLikeContext) == 0 || limit == 0 {
+		return nil
+	}
+
+	size := len(sm.reciprocalLikeContext)
+	if limit > 0 && limit < size {
+		size = limit
+	}
+
+	start := len(sm.reciprocalLikeContext) - size
+	out := make([]RecentReciprocalLikeContext, size)
+	copy(out, sm.reciprocalLikeContext[start:])
+	return out
+}
+
+func (sm *StateMachine) ClearRecentReciprocalLikeContexts() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.reciprocalLikeContext = nil
+}
+
+func (sm *StateMachine) pruneReciprocalLikeContextLocked(now time.Time) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	pruned := sm.reciprocalLikeContext[:0]
+	for _, entry := range sm.reciprocalLikeContext {
+		if now.Sub(entry.CapturedAt) > reciprocalLikeContextTTL {
+			continue
+		}
+		pruned = append(pruned, entry)
+	}
+	sm.reciprocalLikeContext = pruned
 }
 
 func (sm *StateMachine) GetProfileLLMCache(key string) (mbti string, opener string, ok bool) {
