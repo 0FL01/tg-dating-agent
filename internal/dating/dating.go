@@ -30,26 +30,27 @@ var jitterRand = rand.New(rand.NewSource(time.Now().UnixNano()))
 
 // Handler handles the dating bot automation
 type Handler struct {
-	config          *standalone.Config
-	client          llm.MultimodalSummarizer
-	replyAudit      replyAuditAppender
-	tgClient        *telegram.Client
-	state           *StateMachine
-	chatID          int64
-	botUsername     string
-	model           string
-	prompt          string
-	actionDelay     time.Duration
-	jitterDelay     time.Duration
-	temperature     float64
-	sendMessageFn   func(context.Context, telegram.InputPeer, string) error
-	sendSleepFn     func(context.Context) error
-	botPeerMu       sync.RWMutex
-	botPeer         telegram.InputPeer
-	lifecycleMu     sync.Mutex
-	lifecycleCtx    context.Context
-	lifecycleCancel context.CancelFunc
-	stopSleepOnce   sync.Once
+	config                       *standalone.Config
+	client                       llm.MultimodalSummarizer
+	replyAudit                   replyAuditAppender
+	tgClient                     *telegram.Client
+	state                        *StateMachine
+	chatID                       int64
+	botUsername                  string
+	model                        string
+	prompt                       string
+	actionDelay                  time.Duration
+	jitterDelay                  time.Duration
+	temperature                  float64
+	sendMessageFn                func(context.Context, telegram.InputPeer, string) error
+	sendSleepFn                  func(context.Context) error
+	deliverReciprocalLikeFinalFn func(context.Context, ReciprocalLikeFinalPayload) error
+	botPeerMu                    sync.RWMutex
+	botPeer                      telegram.InputPeer
+	lifecycleMu                  sync.Mutex
+	lifecycleCtx                 context.Context
+	lifecycleCancel              context.CancelFunc
+	stopSleepOnce                sync.Once
 }
 
 type replyAuditAppender interface {
@@ -173,6 +174,10 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 
 	if strings.Contains(text, PatternWriteMessage) {
 		return h.sendPendingMessage(m)
+	}
+
+	if isStartChattingMessage(text) {
+		return h.handleReciprocalLikeFinalMessage(m)
 	}
 
 	if strings.Contains(text, PatternViewProfiles) {
@@ -300,6 +305,31 @@ func (h *Handler) handleReciprocalLikePrompt(m *telegram.NewMessage) error {
 		log.Printf("[%s] Failed to open reciprocal-like prompt with button %q: %v", h.Name(), buttonText, err)
 	}
 
+	return nil
+}
+
+func (h *Handler) handleReciprocalLikeFinalMessage(m *telegram.NewMessage) error {
+	payload, ok := h.BuildReciprocalLikeFinalPayload(m, time.Now())
+	if !ok {
+		log.Printf("[%s] Start chatting message detected, but payload assembly failed (no valid Telegram contact URL)", h.Name())
+		return nil
+	}
+
+	if err := h.deliverReciprocalLikeFinalPayload(h.lifecycleContext(), payload); err != nil {
+		log.Printf("[%s] Reciprocal-like final payload handling failed: %v", h.Name(), err)
+		return nil
+	}
+
+	return nil
+}
+
+func (h *Handler) deliverReciprocalLikeFinalPayload(ctx context.Context, payload ReciprocalLikeFinalPayload) error {
+	if h.deliverReciprocalLikeFinalFn != nil {
+		return h.deliverReciprocalLikeFinalFn(ctx, payload)
+	}
+
+	log.Printf("[%s] Reciprocal-like final payload assembled: username=%q url=%q context=%t",
+		h.Name(), payload.ContactUsername, payload.RawContactURL, !payload.ContextCapturedAt.IsZero())
 	return nil
 }
 

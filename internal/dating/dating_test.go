@@ -1989,6 +1989,100 @@ func TestHandleReciprocalLikePromptWithShowButtonStaysNonTerminal(t *testing.T) 
 	}
 }
 
+func TestHandleStartChattingAssemblesReciprocalFinalPayloadNonTerminal(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+
+	contextCapturedAt := time.Now()
+	h.state.AddRecentReciprocalLikeContext(RecentReciprocalLikeContext{
+		ProfileText: "profile bio",
+		OpenerText:  "hello opener",
+		MBTI:        "INTJ",
+		CapturedAt:  contextCapturedAt,
+	})
+
+	var (
+		deliverCalls int
+		gotPayload   ReciprocalLikeFinalPayload
+	)
+	h.deliverReciprocalLikeFinalFn = func(_ context.Context, payload ReciprocalLikeFinalPayload) error {
+		deliverCalls++
+		gotPayload = payload
+		return nil
+	}
+
+	err := h.Handle(&telegram.NewMessage{Message: &telegram.MessageObj{
+		Date:    1710001100,
+		Message: "It's a match! Start chatting: https://t.me/final_user?text=Hi%20there",
+	}})
+	if err != nil {
+		t.Fatalf("Handle() error = %v, want nil", err)
+	}
+
+	if deliverCalls != 1 {
+		t.Fatalf("deliverReciprocalLikeFinalFn calls = %d, want 1", deliverCalls)
+	}
+
+	if gotPayload.ContactUsername != "final_user" {
+		t.Fatalf("payload.ContactUsername = %q, want %q", gotPayload.ContactUsername, "final_user")
+	}
+	if gotPayload.RawContactURL != "https://t.me/final_user?text=Hi%20there" {
+		t.Fatalf("payload.RawContactURL = %q, want %q", gotPayload.RawContactURL, "https://t.me/final_user?text=Hi%20there")
+	}
+	if gotPayload.DeeplinkText != "Hi there" {
+		t.Fatalf("payload.DeeplinkText = %q, want %q", gotPayload.DeeplinkText, "Hi there")
+	}
+	if gotPayload.ProfileText != "profile bio" || gotPayload.OpenerText != "hello opener" || gotPayload.MBTI != "INTJ" {
+		t.Fatalf("payload context fields = [%q, %q, %q], want [profile bio, hello opener, INTJ]", gotPayload.ProfileText, gotPayload.OpenerText, gotPayload.MBTI)
+	}
+	if !gotPayload.ContextCapturedAt.Equal(contextCapturedAt) {
+		t.Fatalf("payload.ContextCapturedAt = %v, want %v", gotPayload.ContextCapturedAt, contextCapturedAt)
+	}
+	if !gotPayload.EventTimestamp.Equal(time.Unix(1710001100, 0)) {
+		t.Fatalf("payload.EventTimestamp = %v, want %v", gotPayload.EventTimestamp, time.Unix(1710001100, 0))
+	}
+
+	if got := h.state.GetState(); got != StateViewingProfiles {
+		t.Fatalf("state after Handle(start chatting) = %v, want %v", got, StateViewingProfiles)
+	}
+
+	select {
+	case <-h.state.ShouldQuit():
+		t.Fatal("quit channel closed for start chatting message")
+	default:
+	}
+}
+
+func TestHandleStartChattingWithoutURLFailsGracefullyAndStaysNonTerminal(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+
+	deliverCalled := false
+	h.deliverReciprocalLikeFinalFn = func(_ context.Context, _ ReciprocalLikeFinalPayload) error {
+		deliverCalled = true
+		return nil
+	}
+
+	err := h.Handle(&telegram.NewMessage{Message: &telegram.MessageObj{Message: "Start chatting now"}})
+	if err != nil {
+		t.Fatalf("Handle() error = %v, want nil", err)
+	}
+
+	if deliverCalled {
+		t.Fatal("deliverReciprocalLikeFinalFn called for start chatting message without URL")
+	}
+
+	if got := h.state.GetState(); got != StateViewingProfiles {
+		t.Fatalf("state after Handle(start chatting without URL) = %v, want %v", got, StateViewingProfiles)
+	}
+
+	select {
+	case <-h.state.ShouldQuit():
+		t.Fatal("quit channel closed for start chatting message without URL")
+	default:
+	}
+}
+
 func TestReciprocalOpenButtonText(t *testing.T) {
 	tests := []struct {
 		name       string
