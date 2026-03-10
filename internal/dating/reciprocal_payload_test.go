@@ -84,7 +84,7 @@ func TestBuildReciprocalLikeFinalPayloadWithContext(t *testing.T) {
 		CapturedAt:  time.Unix(1710000050, 0),
 	}
 
-	payload, ok := buildReciprocalLikeFinalPayload(msg, ctx, true, eventNow)
+	payload, ok := buildReciprocalLikeFinalPayload(msg, RecentVisibleProfileCard{}, false, ctx, true, eventNow)
 	if !ok {
 		t.Fatal("buildReciprocalLikeFinalPayload() ok = false, want true")
 	}
@@ -118,7 +118,7 @@ func TestBuildReciprocalLikeFinalPayloadWithoutContext(t *testing.T) {
 		Message: "Start chatting here https://t.me/no_context",
 	}}
 
-	payload, ok := buildReciprocalLikeFinalPayload(msg, RecentReciprocalLikeContext{}, false, eventNow)
+	payload, ok := buildReciprocalLikeFinalPayload(msg, RecentVisibleProfileCard{}, false, RecentReciprocalLikeContext{}, false, eventNow)
 	if !ok {
 		t.Fatal("buildReciprocalLikeFinalPayload() ok = false, want true")
 	}
@@ -140,5 +140,38 @@ func TestBuildReciprocalLikeFinalPayloadWithoutContext(t *testing.T) {
 	}
 	if !payload.EventTimestamp.Equal(eventNow) {
 		t.Fatalf("EventTimestamp = %v, want %v", payload.EventTimestamp, eventNow)
+	}
+}
+
+func TestBuildReciprocalLikeFinalPayloadPrefersVisibleProfileAndDropsStaleOpener(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+	now := time.Unix(1711000100, 0)
+
+	h.state.AddRecentReciprocalLikeContext(RecentReciprocalLikeContext{
+		ProfileText: "Alice, 28 - Loves hiking",
+		OpenerText:  "Hi Alice!",
+		MBTI:        "INTJ",
+		CapturedAt:  now.Add(-2 * time.Minute),
+	})
+	h.state.RememberVisibleProfileCard("Bella, 27 - Coffee and books", 200, now.Add(-time.Minute))
+
+	msg := &telegram.NewMessage{ID: 201, Message: &telegram.MessageObj{Message: "Excellent! Start chatting 👉 Bella https://t.me/bella_user?text=Hey"}}
+
+	payload, ok := h.BuildReciprocalLikeFinalPayload(msg, now)
+	if !ok {
+		t.Fatal("BuildReciprocalLikeFinalPayload() ok = false, want true")
+	}
+
+	if payload.ProfileText != "Bella, 27 - Coffee and books" {
+		t.Fatalf("ProfileText = %q, want %q", payload.ProfileText, "Bella, 27 - Coffee and books")
+	}
+	if payload.OpenerText != "" {
+		t.Fatalf("OpenerText = %q, want empty", payload.OpenerText)
+	}
+	if payload.MBTI != "" {
+		t.Fatalf("MBTI = %q, want empty", payload.MBTI)
+	}
+	if !payload.ContextCapturedAt.IsZero() {
+		t.Fatalf("ContextCapturedAt = %v, want zero", payload.ContextCapturedAt)
 	}
 }

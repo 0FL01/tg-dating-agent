@@ -495,3 +495,34 @@ func TestStateMachineRecentReciprocalLikeContextConcurrentAccess(t *testing.T) {
 		t.Fatalf("ListRecentReciprocalLikeContexts() len=%d, want <=%d", len(list), sm.reciprocalLikeMax)
 	}
 }
+
+func TestStateMachineLatestVisibleProfileCardByMessageOrdering(t *testing.T) {
+	sm := NewStateMachine()
+	now := time.Unix(10000, 0)
+
+	sm.RememberVisibleProfileCard("profile A", 110, now)
+	sm.RememberVisibleProfileCard("profile B", 120, now.Add(time.Second))
+
+	entry, ok := sm.GetLatestVisibleProfileCardBefore(121, now.Add(2*time.Second))
+	if !ok {
+		t.Fatal("GetLatestVisibleProfileCardBefore(121) ok=false, want true")
+	}
+	if entry.ProfileText != "profile B" || entry.MessageID != 120 {
+		t.Fatalf("visible profile = %+v, want profile B with id 120", entry)
+	}
+
+	if _, ok := sm.GetLatestVisibleProfileCardBefore(120, now.Add(2*time.Second)); ok {
+		t.Fatal("GetLatestVisibleProfileCardBefore(120) ok=true, want false")
+	}
+}
+
+func TestStateMachineLatestVisibleProfileCardTTLExpiry(t *testing.T) {
+	sm := NewStateMachine()
+	now := time.Unix(11000, 0)
+
+	sm.RememberVisibleProfileCard("profile stale", 200, now)
+
+	if _, ok := sm.GetLatestVisibleProfileCardBefore(210, now.Add(visibleProfileCardTTL+time.Nanosecond)); ok {
+		t.Fatal("GetLatestVisibleProfileCardBefore() ok=true after TTL expiry, want false")
+	}
+}

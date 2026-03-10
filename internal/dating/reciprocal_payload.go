@@ -102,7 +102,7 @@ func parseTelegramContactURL(rawURL string) (*url.URL, bool) {
 	return parsed, true
 }
 
-func buildReciprocalLikeFinalPayload(m *telegram.NewMessage, latest RecentReciprocalLikeContext, hasContext bool, now time.Time) (ReciprocalLikeFinalPayload, bool) {
+func buildReciprocalLikeFinalPayload(m *telegram.NewMessage, visibleProfile RecentVisibleProfileCard, hasVisibleProfile bool, latest RecentReciprocalLikeContext, hasContext bool, now time.Time) (ReciprocalLikeFinalPayload, bool) {
 	if m == nil || !isStartChattingMessage(m.Text()) {
 		return ReciprocalLikeFinalPayload{}, false
 	}
@@ -126,6 +126,16 @@ func buildReciprocalLikeFinalPayload(m *telegram.NewMessage, latest RecentRecipr
 	payload.ContactUsername = strings.TrimPrefix(firstPathSegment(parsedURL.Path), "@")
 	payload.DeeplinkText = parsedURL.Query().Get("text")
 
+	if hasVisibleProfile {
+		payload.ProfileText = visibleProfile.ProfileText
+		if hasContext && reciprocalContextMatchesProfileText(latest, visibleProfile.ProfileText) {
+			payload.OpenerText = latest.OpenerText
+			payload.MBTI = latest.MBTI
+			payload.ContextCapturedAt = latest.CapturedAt
+		}
+		return payload, true
+	}
+
 	if hasContext {
 		payload.ProfileText = latest.ProfileText
 		payload.OpenerText = latest.OpenerText
@@ -142,7 +152,26 @@ func (h *Handler) BuildReciprocalLikeFinalPayload(m *telegram.NewMessage, now ti
 	}
 
 	latest, hasContext := h.state.GetLatestReciprocalLikeContext(now)
-	return buildReciprocalLikeFinalPayload(m, latest, hasContext, now)
+	visibleProfile, hasVisibleProfile := h.state.GetLatestVisibleProfileCardBefore(messageIDFromMessage(m), now)
+	return buildReciprocalLikeFinalPayload(m, visibleProfile, hasVisibleProfile, latest, hasContext, now)
+}
+
+func reciprocalContextMatchesProfileText(context RecentReciprocalLikeContext, profileText string) bool {
+	contextProfileText := normalizeProfileTextForCache(context.ProfileText)
+	visibleProfileText := normalizeProfileTextForCache(profileText)
+	if contextProfileText == "" || visibleProfileText == "" {
+		return false
+	}
+
+	return contextProfileText == visibleProfileText
+}
+
+func messageIDFromMessage(m *telegram.NewMessage) int32 {
+	if m == nil {
+		return 0
+	}
+
+	return m.ID
 }
 
 func eventTimestampFromMessage(m *telegram.NewMessage, fallback time.Time) time.Time {

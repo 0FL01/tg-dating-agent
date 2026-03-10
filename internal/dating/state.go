@@ -2,6 +2,7 @@ package dating
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,6 +75,7 @@ type StateMachine struct {
 	profileLLMCacheMax    int
 	reciprocalLikeContext []RecentReciprocalLikeContext
 	reciprocalLikeMax     int
+	visibleProfileCard    RecentVisibleProfileCard
 }
 
 const ownProfileSkipTTL = 45 * time.Second
@@ -83,12 +85,19 @@ const startupOwnProfileSkipTTL = 90 * time.Second
 const defaultProfileLLMCacheMaxEntries = 1000
 const reciprocalLikeContextTTL = 30 * time.Minute
 const defaultReciprocalLikeContextMaxEntries = 64
+const visibleProfileCardTTL = 30 * time.Minute
 
 type RecentReciprocalLikeContext struct {
 	ProfileText string
 	OpenerText  string
 	MBTI        string
 	Fingerprint string
+	CapturedAt  time.Time
+}
+
+type RecentVisibleProfileCard struct {
+	ProfileText string
+	MessageID   int32
 	CapturedAt  time.Time
 }
 
@@ -266,6 +275,7 @@ func (sm *StateMachine) SetState(state State) {
 		sm.latestProfileJobID = 0
 		sm.lastProcessedJobID = 0
 		sm.stuckEscalationLevel = 0
+		sm.visibleProfileCard = RecentVisibleProfileCard{}
 	}
 }
 
@@ -285,6 +295,7 @@ func (sm *StateMachine) SetStateIfNotStopped(state State) bool {
 		sm.latestProfileJobID = 0
 		sm.lastProcessedJobID = 0
 		sm.stuckEscalationLevel = 0
+		sm.visibleProfileCard = RecentVisibleProfileCard{}
 	}
 
 	return true
@@ -389,6 +400,57 @@ func (sm *StateMachine) BeginShutdown() {
 	sm.latestProfileJobID = 0
 	sm.lastProcessedJobID = 0
 	sm.stuckEscalationLevel = 0
+	sm.visibleProfileCard = RecentVisibleProfileCard{}
+}
+
+func (sm *StateMachine) RememberVisibleProfileCard(profileText string, messageID int32, now time.Time) {
+	trimmedProfileText := strings.TrimSpace(profileText)
+	if trimmedProfileText == "" {
+		return
+	}
+
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.pruneVisibleProfileCardLocked(now)
+	sm.visibleProfileCard = RecentVisibleProfileCard{
+		ProfileText: trimmedProfileText,
+		MessageID:   messageID,
+		CapturedAt:  now,
+	}
+}
+
+func (sm *StateMachine) GetLatestVisibleProfileCardBefore(messageID int32, now time.Time) (RecentVisibleProfileCard, bool) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.pruneVisibleProfileCardLocked(now)
+
+	if strings.TrimSpace(sm.visibleProfileCard.ProfileText) == "" {
+		return RecentVisibleProfileCard{}, false
+	}
+
+	if messageID > 0 && sm.visibleProfileCard.MessageID > 0 && sm.visibleProfileCard.MessageID >= messageID {
+		return RecentVisibleProfileCard{}, false
+	}
+
+	return sm.visibleProfileCard, true
+}
+
+func (sm *StateMachine) pruneVisibleProfileCardLocked(now time.Time) {
+	if sm.visibleProfileCard.CapturedAt.IsZero() {
+		return
+	}
+
+	if now.Sub(sm.visibleProfileCard.CapturedAt) > visibleProfileCardTTL {
+		sm.visibleProfileCard = RecentVisibleProfileCard{}
+	}
 }
 
 func (sm *StateMachine) NextStuckRecoveryEscalation() int {

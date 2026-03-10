@@ -218,6 +218,7 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 			}
 			return nil
 		}
+		h.rememberVisibleProfileCard(m.Text(), m.ID)
 		if !h.state.Enqueue(ProfileJob{Type: "message", Message: m, ProfileMessageID: m.ID}) {
 			log.Printf("[%s] Queue full, skipping profile", h.Name())
 		} else {
@@ -235,6 +236,7 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 			return nil
 		}
 
+		h.rememberVisibleProfileCard(text, m.ID)
 		if !h.state.Enqueue(ProfileJob{Type: "message", Message: m, ProfileMessageID: m.ID}) {
 			log.Printf("[%s] Queue full, skipping text-only profile", h.Name())
 		} else {
@@ -1000,6 +1002,10 @@ func (h *Handler) HandleAlbum(a *telegram.Album) error {
 		return nil
 	}
 
+	if profileText, messageID, ok := visibleProfileCardFromAlbum(a); ok {
+		h.rememberVisibleProfileCard(profileText, messageID)
+	}
+
 	// Add to queue instead of direct processing
 	if !h.state.Enqueue(ProfileJob{Type: "album", Album: a, ProfileMessageID: maxAlbumMessageID(a)}) {
 		log.Printf("[%s] Queue full, skipping album", h.Name())
@@ -1186,6 +1192,10 @@ func (h *Handler) rememberGroupedCaption(m *telegram.NewMessage, text string) {
 	h.state.RememberGroupedCaption(m.Message.GroupedID, trimmed, m.ID, time.Now())
 }
 
+func (h *Handler) rememberVisibleProfileCard(profileText string, messageID int32) {
+	h.state.RememberVisibleProfileCard(profileText, messageID, time.Now())
+}
+
 func shouldStopWorker(ctx context.Context, quit <-chan struct{}) bool {
 	select {
 	case <-ctx.Done():
@@ -1366,6 +1376,24 @@ func firstAlbumGroupedID(a *telegram.Album) int64 {
 	}
 
 	return groupedID
+}
+
+func visibleProfileCardFromAlbum(a *telegram.Album) (profileText string, messageID int32, ok bool) {
+	if a == nil {
+		return "", 0, false
+	}
+
+	msg := selectAlbumTextSourceMessage(a.Messages)
+	if msg == nil {
+		return "", 0, false
+	}
+
+	text := strings.TrimSpace(msg.Text())
+	if text == "" {
+		return "", 0, false
+	}
+
+	return text, msg.ID, true
 }
 
 func profileTextFromAlbumMessages(messages []*telegram.NewMessage) string {
