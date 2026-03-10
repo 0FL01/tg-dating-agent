@@ -1,6 +1,8 @@
 # Project: tg-dating-agent
 
-Автономный Telegram userbot для автоматизации работы с `@leomatchbot`. Бот запускается от вашего Telegram-аккаунта, анализирует анкеты, определяет MBTI-тип через LLM и генерирует первое сообщение через OpenRouter.
+Двухкомпонентная система для автоматизации работы с `@leomatchbot`:
+- **Dating Agent** (userbot): Запускается от вашего Telegram-аккаунта, анализирует анкеты, определяет MBTI-тип через LLM и генерирует первое сообщение через OpenRouter.
+- **Match Forwarder** (HTTP webhook → Telegram bot): Принимает вебхуки с событиями mutual-likes от Dating Agent и доставляет уведомления в указанный чат через Telegram Bot API.
 
 **Tech Stack:**
 - Language: Go 1.25
@@ -15,20 +17,31 @@ The default branch is `main`.
 
 <root>/
 ├── cmd/
-│   └── dating/
-│       ├── main.go              # Entry point: setup, auth, event handlers
-│       └── main_test.go         # Tests for main orchestration logic
+│   ├── dating/
+│   │   ├── main.go              # Entry point: setup, auth, event handlers
+│   │   └── main_test.go         # Tests for main orchestration logic
+│   └── match-forwarder/
+│       ├── main.go              # Entry point: HTTP webhook server for match notifications
+│       └── main_test.go         # Tests for forwarder orchestration logic
 ├── internal/
 │   ├── dating/
 │   │   ├── dating.go            # Core logic: worker pool, profile processing, message generation, retry flow
 │   │   ├── state.go             # State machine with profile queue (buffer 50), worker goroutine, graceful shutdown
 │   │   ├── messages.go          # Constants: button texts, patterns, retry prompts
 │   │   ├── markup.go            # Reply markup helpers for button detection
+│   │   ├── webhook_client.go    # Outbound webhook client for reciprocal-like events
 │   │   ├── bootstrap.go         # Standalone handler wiring for external entrypoints
 │   │   ├── dating_test.go       # Tests for dating logic
 │   │   ├── state_test.go        # Tests for state machine
 │   │   ├── markup_test.go       # Tests for markup helpers
 │   │   └── bootstrap_test.go    # Tests for bootstrap logic
+│   ├── forwarder/
+│   │   ├── config.go            # Forwarder environment config loading with defaults
+│   │   ├── sender.go            # Telegram Bot API sender for delivering messages
+│   │   ├── webhook.go           # HTTP webhook handler and server for inbound match events
+│   │   ├── config_test.go       # Config loading tests
+│   │   ├── sender_test.go       # Telegram sender tests
+│   │   └── webhook_test.go      # Webhook handler tests
 │   ├── llm/
 │   │   ├── client.go            # OpenRouter API client with multimodal support
 │   │   ├── types.go             # Interfaces and content types
@@ -45,12 +58,15 @@ The default branch is `main`.
 │   └── utils/
 │       ├── string.go            # String truncation and utilities
 │       └── string_test.go       # String utilities tests
-├── docker-compose.yml           # Docker Compose with persistent volume
-├── Dockerfile                   # Multi-stage build, non-root user
+├── docker-compose.yml           # Docker Compose for Dating Agent with persistent volume
+├── docker-compose.forwarder.yml # Docker Compose for Match Forwarder service
+├── Dockerfile                   # Multi-stage build for Dating Agent (non-root user)
+├── Dockerfile.forwarder         # Multi-stage build for Match Forwarder (non-root user)
 └── env.example                  # Environment variables template
 
 ### Key Modules
-- **dating**: Profile queue (buffer 50), worker goroutine, MBTI filtering, message generation workflow, retry logic, button detection; own-profile skip via correlated context (message-id + TTL) and startup fallback (90s TTL); recovery jobs (menu_recovery, stuck_recovery) with deduplication; deterministic album text binding (photo caption preference, message ID ordering)
+- **dating**: Profile queue (buffer 50), worker goroutine, MBTI filtering, message generation workflow, retry logic, button detection; own-profile skip via correlated context (message-id + TTL) and startup fallback (90s TTL); recovery jobs (menu_recovery, stuck_recovery) with deduplication; deterministic album text binding (photo caption preference, message ID ordering); outbound webhook delivery for reciprocal-like events
+- **forwarder**: HTTP webhook server for receiving match notifications from Dating Agent, Telegram Bot API sender for delivering messages to target chat; authentication via Bearer token or custom header; configurable timeout and bind address
 - **llm**: OpenRouter integration with image+text multimodal support
 - **standalone**: Configuration, authentication, and bootstrap wiring
 - **tghelper**: Resilient Telegram API operations with retry logic, exponential backoff, jitter
@@ -78,6 +94,7 @@ States: `idle` → `enqueue` (add to queue) → `viewing_profiles` → `waiting_
 - Stopped on match or `*stop`/`💤` command
 - Sequential processing via worker goroutine with buffered profile queue (50 jobs)
 - Graceful shutdown: worker goroutine terminated via quitChan; queue drained on stop
+- **Match Forwarding**: Reciprocal-like final events trigger outbound webhook delivery (if configured); forwarder receives payload and formats/sends Telegram message to target chat
 
 ### 4. LLM Integration Flow
 1. Download profile photo(s) (single photo or album)
@@ -88,12 +105,13 @@ States: `idle` → `enqueue` (add to queue) → `viewing_profiles` → `waiting_
 6. Handle retry scenarios (too long/too short messages) with fallback logic
 
 ### 5. Key Environment Variables
+
+#### Dating Agent
 - `TG_APP_ID`, `TG_APP_HASH` (or `TG_APP_APP_HASH`) - Telegram API credentials
 - `TG_STRING_SESSION` - Preferred session method for Docker
 - `SESSION_PATH` - Fallback session file path (default: session.dat)
 - `OPENROUTER_API_KEY` - LLM API access
 - `OPENROUTER_MODEL` - Model for LLM requests (default: google/gemini-2.5-flash)
-- `DATING_BOT_CHAT_ID` - Dating bot chat ID (default: 1234060895)
 - `DATING_MODEL` - Model for dating requests (default: google/gemini-2.5-flash-lite-preview-06-2025)
 - `DATING_MBTI_ALLOWLIST` - MBTI filter (comma-separated, default: INTJ,INFJ,ENTJ,ENFJ)
 - `DATING_ACTION_DELAY` - Anti-spam delay between actions (default: 15s)
@@ -104,3 +122,18 @@ States: `idle` → `enqueue` (add to queue) → `viewing_profiles` → `waiting_
 - `DATING_TEMPERATURE` - LLM temperature parameter (default: 0.7)
 - `DATING_PROMPT` - Custom prompt for message generation
 - `DATING_MBTI_PROMPT` - Custom prompt for MBTI analysis
+
+#### Match Webhook (Dating Agent → Forwarder)
+- `DATING_MATCH_WEBHOOK_URL` - Forwarder webhook endpoint (empty disables)
+- `DATING_MATCH_WEBHOOK_TOKEN` - Bearer token for webhook authentication
+- `DATING_MATCH_WEBHOOK_TIMEOUT` - HTTP timeout for webhook delivery (default: 5s)
+- `DATING_INSTANCE_NAME` - Instance identifier sent as `X-Dating-Instance-Name` header
+
+#### Match Forwarder Service
+- `FORWARDER_BOT_TOKEN` - Telegram Bot API token for sending messages (required)
+- `FORWARDER_TARGET_CHAT_ID` - Target chat ID for match notifications (required)
+- `FORWARDER_TELEGRAM_API_BASE_URL` - Telegram Bot API base URL (default: https://api.telegram.org)
+- `FORWARDER_HTTP_TIMEOUT` - HTTP timeout for Bot API calls (default: 10s)
+- `FORWARDER_BIND_ADDRESS` - Webhook server bind address (default: :8080)
+- `FORWARDER_WEBHOOK_PATH` - Webhook endpoint path (default: /webhook/reciprocal-like-final)
+- `FORWARDER_WEBHOOK_AUTH_TOKEN` - Token for authenticating inbound webhook requests (required)
