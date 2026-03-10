@@ -48,13 +48,14 @@ type ProfileJob struct {
 }
 
 type StateMachine struct {
-	mu             sync.RWMutex
-	state          State
-	pendingMessage string
-	retryCount     int
-	profileData    *ProfileData
-	pausedUntil    time.Time
-	ownProfileSkip ownProfileSkipContext
+	mu                   sync.RWMutex
+	state                State
+	stuckEscalationLevel int
+	pendingMessage       string
+	retryCount           int
+	profileData          *ProfileData
+	pausedUntil          time.Time
+	ownProfileSkip       ownProfileSkipContext
 	// New fields for worker pool pattern:
 	profileQueue          chan ProfileJob // buffered channel for profile queue
 	quitChan              chan struct{}   // for graceful shutdown
@@ -264,6 +265,7 @@ func (sm *StateMachine) SetState(state State) {
 		sm.startupOwnProfileSkip = startupOwnProfileSkipContext{}
 		sm.latestProfileJobID = 0
 		sm.lastProcessedJobID = 0
+		sm.stuckEscalationLevel = 0
 	}
 }
 
@@ -282,6 +284,7 @@ func (sm *StateMachine) SetStateIfNotStopped(state State) bool {
 		sm.startupOwnProfileSkip = startupOwnProfileSkipContext{}
 		sm.latestProfileJobID = 0
 		sm.lastProcessedJobID = 0
+		sm.stuckEscalationLevel = 0
 	}
 
 	return true
@@ -385,6 +388,30 @@ func (sm *StateMachine) BeginShutdown() {
 	sm.startupOwnProfileSkip = startupOwnProfileSkipContext{}
 	sm.latestProfileJobID = 0
 	sm.lastProcessedJobID = 0
+	sm.stuckEscalationLevel = 0
+}
+
+func (sm *StateMachine) NextStuckRecoveryEscalation() int {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	switch sm.stuckEscalationLevel {
+	case 0:
+		sm.stuckEscalationLevel = 1
+		return 1
+	case 1:
+		sm.stuckEscalationLevel = 2
+		return 2
+	default:
+		sm.stuckEscalationLevel = 0
+		return 3
+	}
+}
+
+func (sm *StateMachine) ResetStuckRecoveryEscalation() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.stuckEscalationLevel = 0
 }
 
 // GetQueue returns the receive-only channel for the profile queue

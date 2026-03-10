@@ -497,6 +497,145 @@ func TestHandleViewingProfilesProfileActionKeyboardStillEnqueuesProfileMessage(t
 	}
 }
 
+func TestProcessJobStuckRecoveryEscalationSequenceReachesStartFallback(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+	h.setBotPeer(&telegram.InputPeerUser{UserID: h.chatID, AccessHash: 1})
+
+	actions := make([]string, 0, 4)
+	h.clickButtonFn = func(_ context.Context, buttonText string) error {
+		actions = append(actions, "button:"+buttonText)
+		return nil
+	}
+	h.sendMessageFn = func(_ context.Context, _ telegram.InputPeer, msg string) error {
+		actions = append(actions, "msg:"+msg)
+		return nil
+	}
+
+	for i := 0; i < 3; i++ {
+		if err := h.processJob(context.Background(), ProfileJob{Type: "stuck_recovery"}); err != nil {
+			t.Fatalf("processJob(stuck_recovery #%d) error = %v", i+1, err)
+		}
+	}
+
+	want := []string{"button:" + ButtonViewProfiles, "button:" + ButtonViewProfiles, "msg:/start"}
+	if len(actions) != len(want) {
+		t.Fatalf("actions len = %d, want %d (%v)", len(actions), len(want), want)
+	}
+	for i := range want {
+		if actions[i] != want[i] {
+			t.Fatalf("actions[%d] = %q, want %q", i, actions[i], want[i])
+		}
+	}
+
+	if got := h.state.GetState(); got != StateIdle {
+		t.Fatalf("state after escalation fallback = %v, want %v", got, StateIdle)
+	}
+}
+
+func TestStuckRecoveryEscalationResetsAfterProgressPath(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+	h.setBotPeer(&telegram.InputPeerUser{UserID: h.chatID, AccessHash: 1})
+
+	actions := make([]string, 0, 4)
+	h.clickButtonFn = func(_ context.Context, buttonText string) error {
+		actions = append(actions, "button:"+buttonText)
+		return nil
+	}
+	h.sendMessageFn = func(_ context.Context, _ telegram.InputPeer, msg string) error {
+		actions = append(actions, "msg:"+msg)
+		return nil
+	}
+
+	if err := h.processJob(context.Background(), ProfileJob{Type: "stuck_recovery"}); err != nil {
+		t.Fatalf("processJob(stuck_recovery first) error = %v", err)
+	}
+
+	profileActionMsg := &telegram.NewMessage{ID: 490, Message: &telegram.MessageObj{
+		Message: "Profile text",
+		ReplyMarkup: &telegram.ReplyKeyboardMarkup{Rows: []*telegram.KeyboardButtonRow{{Buttons: []telegram.KeyboardButton{
+			&telegram.KeyboardButtonObj{Text: ButtonLike},
+			&telegram.KeyboardButtonObj{Text: ButtonLikeMessage},
+			&telegram.KeyboardButtonObj{Text: ButtonDislike},
+		}}}},
+		PeerID: &telegram.PeerUser{UserID: h.chatID},
+	}}
+
+	if err := h.Handle(profileActionMsg); err != nil {
+		t.Fatalf("Handle(profileActionMsg) error = %v", err)
+	}
+
+	job := mustDequeueJob(t, h.state)
+	if job.Type != "message" {
+		t.Fatalf("queued job type = %q, want %q", job.Type, "message")
+	}
+
+	if err := h.processJob(context.Background(), ProfileJob{Type: "stuck_recovery"}); err != nil {
+		t.Fatalf("processJob(stuck_recovery second after progress) error = %v", err)
+	}
+	if err := h.processJob(context.Background(), ProfileJob{Type: "stuck_recovery"}); err != nil {
+		t.Fatalf("processJob(stuck_recovery third after progress) error = %v", err)
+	}
+
+	for _, action := range actions {
+		if action == "msg:/start" {
+			t.Fatalf("unexpected /start fallback after progress reset, actions=%v", actions)
+		}
+	}
+}
+
+func TestProcessJobStuckRecoverySkipsActionsWhenPaused(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+	h.state.PauseFor(time.Hour)
+	h.setBotPeer(&telegram.InputPeerUser{UserID: h.chatID, AccessHash: 1})
+
+	actionCalls := 0
+	h.clickButtonFn = func(_ context.Context, _ string) error {
+		actionCalls++
+		return nil
+	}
+	h.sendMessageFn = func(_ context.Context, _ telegram.InputPeer, _ string) error {
+		actionCalls++
+		return nil
+	}
+
+	if err := h.processJob(context.Background(), ProfileJob{Type: "stuck_recovery"}); err != nil {
+		t.Fatalf("processJob(stuck_recovery) error = %v", err)
+	}
+
+	if actionCalls != 0 {
+		t.Fatalf("stuck recovery actions while paused = %d, want 0", actionCalls)
+	}
+}
+
+func TestHandleProfileActionKeyboardRoutingUnaffectedByStuckEscalationState(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+	h.state.NextStuckRecoveryEscalation()
+	h.state.NextStuckRecoveryEscalation()
+
+	msg := &telegram.NewMessage{ID: 491, Message: &telegram.MessageObj{
+		Message: "Profile text",
+		ReplyMarkup: &telegram.ReplyKeyboardMarkup{Rows: []*telegram.KeyboardButtonRow{{Buttons: []telegram.KeyboardButton{
+			&telegram.KeyboardButtonObj{Text: ButtonLike},
+			&telegram.KeyboardButtonObj{Text: ButtonLikeMessage},
+			&telegram.KeyboardButtonObj{Text: ButtonDislike},
+		}}}},
+		PeerID: &telegram.PeerUser{UserID: h.chatID},
+	}}
+
+	if err := h.Handle(msg); err != nil {
+		t.Fatalf("Handle(profile-action text) error = %v", err)
+	}
+
+	job := mustDequeueJob(t, h.state)
+	if job.Type != "message" || job.Message == nil || job.Message.ID != 491 {
+		t.Fatalf("queued job = %+v, want message job id 491", job)
+	}
+}
+
 func TestHandleSkipsStartupOwnProfileWithoutMarkerThenRecoversFromMenu(t *testing.T) {
 	h := &Handler{chatID: 123456789, state: NewStateMachine()}
 	h.state.ArmStartupOwnProfileSkip(time.Now())
@@ -1431,6 +1570,8 @@ func TestIsDailyLimitMessage(t *testing.T) {
 func TestHandleDailyLimitPausesAndResetsState(t *testing.T) {
 	h := &Handler{state: NewStateMachine()}
 	h.state.SetState(StateViewingProfiles)
+	h.state.NextStuckRecoveryEscalation()
+	h.state.NextStuckRecoveryEscalation()
 	h.state.SetPendingMessage("draft")
 	h.state.SetProfileData(&ProfileData{ProfileText: "bio", PhotoPaths: []string{"/tmp/photo.jpg"}})
 	h.state.IncrementRetry()
@@ -1465,6 +1606,10 @@ func TestHandleDailyLimitPausesAndResetsState(t *testing.T) {
 	remaining := until.Sub(time.Now())
 	if remaining > DailyLimitPauseDuration || remaining < DailyLimitPauseDuration-2*time.Second {
 		t.Fatalf("pause remaining = %v, want close to %v", remaining, DailyLimitPauseDuration)
+	}
+
+	if got := h.state.NextStuckRecoveryEscalation(); got != 1 {
+		t.Fatalf("stuck escalation after daily limit reset = %d, want 1", got)
 	}
 }
 

@@ -142,6 +142,28 @@ func TestStateMachineEnqueueDeduplicatesRecoveryJobsUntilDequeued(t *testing.T) 
 	}
 }
 
+func TestStateMachineStuckRecoveryEscalationCyclesAndResets(t *testing.T) {
+	sm := NewStateMachine()
+
+	if got := sm.NextStuckRecoveryEscalation(); got != 1 {
+		t.Fatalf("NextStuckRecoveryEscalation() first = %d, want 1", got)
+	}
+	if got := sm.NextStuckRecoveryEscalation(); got != 2 {
+		t.Fatalf("NextStuckRecoveryEscalation() second = %d, want 2", got)
+	}
+	if got := sm.NextStuckRecoveryEscalation(); got != 3 {
+		t.Fatalf("NextStuckRecoveryEscalation() third = %d, want 3", got)
+	}
+	if got := sm.NextStuckRecoveryEscalation(); got != 1 {
+		t.Fatalf("NextStuckRecoveryEscalation() after level 3 reset = %d, want 1", got)
+	}
+
+	sm.ResetStuckRecoveryEscalation()
+	if got := sm.NextStuckRecoveryEscalation(); got != 1 {
+		t.Fatalf("NextStuckRecoveryEscalation() after explicit reset = %d, want 1", got)
+	}
+}
+
 func TestStateMachineBeginShutdownAtomicallyStopsAndRejectsEnqueue(t *testing.T) {
 	sm := NewStateMachine()
 	sm.MarkOwnProfileSkip(123, time.Now())

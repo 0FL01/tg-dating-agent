@@ -42,6 +42,7 @@ type Handler struct {
 	actionDelay                  time.Duration
 	jitterDelay                  time.Duration
 	temperature                  float64
+	clickButtonFn                func(context.Context, string) error
 	sendMessageFn                func(context.Context, telegram.InputPeer, string) error
 	sendSleepFn                  func(context.Context) error
 	deliverReciprocalLikeFinalFn func(context.Context, ReciprocalLikeFinalPayload) error
@@ -154,6 +155,7 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 
 	if isDailyLimitMessage(text) {
 		pausedUntil := h.state.PauseFor(DailyLimitPauseDuration)
+		h.state.ResetStuckRecoveryEscalation()
 		h.state.ClearPendingMessage()
 		h.state.ClearProfileData()
 		h.state.ResetRetry()
@@ -218,6 +220,8 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 		}
 		if !h.state.Enqueue(ProfileJob{Type: "message", Message: m, ProfileMessageID: m.ID}) {
 			log.Printf("[%s] Queue full, skipping profile", h.Name())
+		} else {
+			h.state.ResetStuckRecoveryEscalation()
 		}
 		return nil
 	}
@@ -233,6 +237,8 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 
 		if !h.state.Enqueue(ProfileJob{Type: "message", Message: m, ProfileMessageID: m.ID}) {
 			log.Printf("[%s] Queue full, skipping text-only profile", h.Name())
+		} else {
+			h.state.ResetStuckRecoveryEscalation()
 		}
 		return nil
 	}
@@ -823,6 +829,9 @@ func (h *Handler) clickButton(buttonText string) error {
 
 func (h *Handler) clickButtonWithContext(ctx context.Context, buttonText string) error {
 	log.Printf("[%s] Clicking button: %s", h.Name(), buttonText)
+	if h.clickButtonFn != nil {
+		return h.clickButtonFn(ctx, buttonText)
+	}
 
 	// Note: Rate limiting is now handled in worker loop via getProcessingDelay()
 	// This method no longer includes time.Sleep to avoid double delays
@@ -994,6 +1003,8 @@ func (h *Handler) HandleAlbum(a *telegram.Album) error {
 	// Add to queue instead of direct processing
 	if !h.state.Enqueue(ProfileJob{Type: "album", Album: a, ProfileMessageID: maxAlbumMessageID(a)}) {
 		log.Printf("[%s] Queue full, skipping album", h.Name())
+	} else {
+		h.state.ResetStuckRecoveryEscalation()
 	}
 	return nil
 }
@@ -1039,6 +1050,7 @@ func (h *Handler) processJob(ctx context.Context, job ProfileJob) error {
 				h.Name(), job.ProfileMessageID, latest, last)
 			return nil
 		}
+		h.state.ResetStuckRecoveryEscalation()
 		return h.processProfile(ctx, job.Message)
 	case "album":
 		if job.Album == nil {
@@ -1049,13 +1061,34 @@ func (h *Handler) processJob(ctx context.Context, job ProfileJob) error {
 				h.Name(), job.ProfileMessageID, latest, last)
 			return nil
 		}
+		h.state.ResetStuckRecoveryEscalation()
 		return h.handleAlbumJob(ctx, job.Album)
 	case "menu_recovery":
 		log.Printf("[%s] Processing menu recovery job", h.Name())
 		return h.clickButtonWithContext(ctx, ButtonViewProfiles)
 	case "stuck_recovery":
 		log.Printf("[%s] Processing stuck recovery job", h.Name())
-		return h.clickButtonWithContext(ctx, ButtonViewProfiles)
+		if h.isPaused() {
+			log.Printf("[%s] Skipping stuck recovery while pause is active", h.Name())
+			return nil
+		}
+
+		escalation := h.state.NextStuckRecoveryEscalation()
+		switch escalation {
+		case 1:
+			log.Printf("[%s] Stuck recovery escalation level 1: click %s", h.Name(), ButtonViewProfiles)
+			return h.clickButtonWithContext(ctx, ButtonViewProfiles)
+		case 2:
+			log.Printf("[%s] Stuck recovery escalation level 2: repeat click %s", h.Name(), ButtonViewProfiles)
+			return h.clickButtonWithContext(ctx, ButtonViewProfiles)
+		default:
+			log.Printf("[%s] Stuck recovery escalation level 3: fallback /start and reset flow", h.Name())
+			if err := h.sendStartCommand(ctx); err != nil {
+				return err
+			}
+			h.state.SetStateIfNotStopped(StateIdle)
+			return nil
+		}
 	case "mine_recovery":
 		log.Printf("[%s] Processing mine recovery job", h.Name())
 		return h.sendStartCommand(ctx)
