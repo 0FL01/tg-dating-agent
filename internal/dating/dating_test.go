@@ -1492,10 +1492,33 @@ func TestFinalizeSendStateResetsConversationInvariant(t *testing.T) {
 	h := &Handler{state: NewStateMachine()}
 	h.state.SetState(StateWaitingPrompt)
 	h.state.SetPendingMessage("draft")
-	h.state.SetProfileData(&ProfileData{ProfileText: "bio", PhotoPaths: []string{"/tmp/photo.jpg"}})
+	h.state.SetProfileData(&ProfileData{
+		ProfileText:      "bio",
+		PhotoPaths:       []string{"/tmp/photo.jpg"},
+		PhotoIdentifiers: []string{"123:456"},
+		MBTI:             "INTJ",
+	})
 	h.state.IncrementRetry()
 
 	h.finalizeSendState()
+
+	contexts := h.state.ListRecentReciprocalLikeContexts(time.Now(), -1)
+	if len(contexts) != 1 {
+		t.Fatalf("ListRecentReciprocalLikeContexts() len=%d, want 1", len(contexts))
+	}
+
+	captured := contexts[0]
+	if captured.ProfileText != "bio" || captured.OpenerText != "draft" || captured.MBTI != "INTJ" {
+		t.Fatalf("captured context = %+v, want bio/draft/INTJ", captured)
+	}
+
+	wantFingerprint := buildProfileLLMCacheKey("bio\ndraft\nINTJ", []string{"123:456"})
+	if captured.Fingerprint != wantFingerprint {
+		t.Fatalf("captured fingerprint = %q, want %q", captured.Fingerprint, wantFingerprint)
+	}
+	if captured.CapturedAt.IsZero() {
+		t.Fatal("captured timestamp is zero, want non-zero")
+	}
 
 	if got := h.state.GetPendingMessage(); got != "" {
 		t.Fatalf("pending message = %q, want empty", got)
@@ -1544,6 +1567,10 @@ func TestSendPendingMessageCacheMissPreservesState(t *testing.T) {
 
 	if got := h.state.GetState(); got != StateWaitingPrompt {
 		t.Fatalf("state = %v, want %v", got, StateWaitingPrompt)
+	}
+
+	if got := h.state.ListRecentReciprocalLikeContexts(time.Now(), -1); len(got) != 0 {
+		t.Fatalf("ListRecentReciprocalLikeContexts() len=%d, want 0", len(got))
 	}
 }
 

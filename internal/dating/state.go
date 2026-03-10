@@ -525,6 +525,8 @@ func (sm *StateMachine) FinalizeSendState(expectedCurrent State) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	sm.captureRecentReciprocalLikeContextLocked(time.Now())
+
 	sm.pendingMessage = ""
 	sm.profileData = nil
 	sm.retryCount = 0
@@ -535,6 +537,36 @@ func (sm *StateMachine) FinalizeSendState(expectedCurrent State) bool {
 	}
 
 	return false
+}
+
+func (sm *StateMachine) captureRecentReciprocalLikeContextLocked(now time.Time) {
+	if sm.profileData == nil {
+		return
+	}
+
+	if sm.profileData.ProfileText == "" && sm.pendingMessage == "" {
+		return
+	}
+
+	entry := RecentReciprocalLikeContext{
+		ProfileText: sm.profileData.ProfileText,
+		OpenerText:  sm.pendingMessage,
+		MBTI:        sm.profileData.MBTI,
+		CapturedAt:  now,
+	}
+
+	fingerprintSource := sm.profileData.ProfileText + "\n" + sm.pendingMessage + "\n" + sm.profileData.MBTI
+	entry.Fingerprint = buildProfileLLMCacheKey(fingerprintSource, sm.profileData.PhotoIdentifiers)
+
+	sm.pruneReciprocalLikeContextLocked(now)
+	sm.reciprocalLikeContext = append(sm.reciprocalLikeContext, entry)
+
+	if len(sm.reciprocalLikeContext) <= sm.reciprocalLikeMax {
+		return
+	}
+
+	overflow := len(sm.reciprocalLikeContext) - sm.reciprocalLikeMax
+	sm.reciprocalLikeContext = append([]RecentReciprocalLikeContext(nil), sm.reciprocalLikeContext[overflow:]...)
 }
 
 func (sm *StateMachine) PauseFor(duration time.Duration) time.Time {
