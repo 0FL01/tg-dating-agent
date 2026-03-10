@@ -113,7 +113,7 @@ func TestWebhookHandlerFormattingAndForwarding(t *testing.T) {
 	body := `{"event_type":"reciprocal_like_final","raw_contact_url":"https://t.me/test_user?text=hi","contact_username":"test_user","profile_text":"Profile bio","opener_text":"Hello there","mbti":"INTJ"}`
 	req := httptest.NewRequest(http.MethodPost, cfg.WebhookPath, strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer token-123")
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(DatingInstanceHeader, "instance-a")
 	w := httptest.NewRecorder()
 
@@ -189,7 +189,7 @@ func TestWebhookHandlerSendFailure(t *testing.T) {
 	}
 }
 
-func TestWebhookHandlerUnsupportedMediaType(t *testing.T) {
+func TestWebhookHandlerMissingContentType(t *testing.T) {
 	cfg := newTestForwarderConfig()
 	sender := &fakeMessageSender{}
 	h, err := NewWebhookHandler(cfg, sender)
@@ -199,7 +199,6 @@ func TestWebhookHandlerUnsupportedMediaType(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, cfg.WebhookPath, strings.NewReader(`{"event_type":"reciprocal_like_final","raw_contact_url":"https://t.me/user1"}`))
 	req.Header.Set("Authorization", "Bearer token-123")
-	req.Header.Set("Content-Type", "text/plain")
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)

@@ -87,7 +87,8 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, cfg *Config, sender M
 		return
 	}
 
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	contentType := strings.TrimSpace(r.Header.Get("Content-Type"))
+	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil || mediaType != "application/json" {
 		http.Error(w, "unsupported media type", http.StatusUnsupportedMediaType)
 		return
