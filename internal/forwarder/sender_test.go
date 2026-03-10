@@ -17,6 +17,9 @@ func TestNewTelegramSenderInvalidConfig(t *testing.T) {
 		TargetChatID:       100,
 		TelegramAPIBaseURL: DefaultTelegramAPIBaseURL,
 		HTTPTimeout:        time.Second,
+		BindAddress:        DefaultBindAddress,
+		WebhookPath:        DefaultWebhookPath,
+		WebhookAuthToken:   "token",
 	})
 	if err == nil {
 		t.Fatal("NewTelegramSender() error = nil, want error")
@@ -55,6 +58,9 @@ func TestTelegramSenderSendMessageSuccess(t *testing.T) {
 		TargetChatID:       12345,
 		TelegramAPIBaseURL: server.URL,
 		HTTPTimeout:        2 * time.Second,
+		BindAddress:        DefaultBindAddress,
+		WebhookPath:        DefaultWebhookPath,
+		WebhookAuthToken:   "token",
 	})
 	if err != nil {
 		t.Fatalf("NewTelegramSender() error = %v", err)
@@ -99,6 +105,9 @@ func TestTelegramSenderSendMessageNon2xx(t *testing.T) {
 		TargetChatID:       12345,
 		TelegramAPIBaseURL: server.URL,
 		HTTPTimeout:        time.Second,
+		BindAddress:        DefaultBindAddress,
+		WebhookPath:        DefaultWebhookPath,
+		WebhookAuthToken:   "token",
 	})
 	if err != nil {
 		t.Fatalf("NewTelegramSender() error = %v", err)
