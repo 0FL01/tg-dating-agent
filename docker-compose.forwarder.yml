@@ -7,7 +7,7 @@ services:
     env_file:
       - .env
     ports:
-      - "8080:8080"
+      - "127.0.0.1:94:8080"
     restart: unless-stopped
     # Read-only root filesystem for additional security
     read_only: true
