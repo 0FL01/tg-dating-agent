@@ -1,8 +1,10 @@
 package forwarder
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,8 +13,10 @@ import (
 )
 
 type fakeMessageSender struct {
-	sendErr  error
-	messages []string
+	sendErr       error
+	sendPhotosErr error
+	messages      []string
+	photos        []Photo
 }
 
 func (f *fakeMessageSender) SendMessage(_ context.Context, text string) error {
@@ -20,6 +24,14 @@ func (f *fakeMessageSender) SendMessage(_ context.Context, text string) error {
 		return f.sendErr
 	}
 	f.messages = append(f.messages, text)
+	return nil
+}
+
+func (f *fakeMessageSender) SendPhotos(_ context.Context, photos []Photo) error {
+	if f.sendPhotosErr != nil {
+		return f.sendPhotosErr
+	}
+	f.photos = append(f.photos, photos...)
 	return nil
 }
 
@@ -55,6 +67,52 @@ func TestWebhookHandlerAuthSuccess(t *testing.T) {
 	}
 	if len(sender.messages) != 1 {
 		t.Fatalf("forwarded messages = %d, want 1", len(sender.messages))
+	}
+}
+
+func TestWebhookHandlerMultipartSuccessWithPhotos(t *testing.T) {
+	cfg := newTestForwarderConfig()
+	sender := &fakeMessageSender{}
+	h, err := NewWebhookHandler(cfg, sender)
+	if err != nil {
+		t.Fatalf("NewWebhookHandler() error = %v", err)
+	}
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	if err := writer.WriteField("payload", `{"event_type":"reciprocal_like_final","raw_contact_url":"https://t.me/user1"}`); err != nil {
+		t.Fatalf("WriteField(payload) error = %v", err)
+	}
+
+	for range 12 {
+		part, err := writer.CreateFormFile("photos", "photo.jpg")
+		if err != nil {
+			t.Fatalf("CreateFormFile() error = %v", err)
+		}
+		if _, err := part.Write([]byte("jpeg-bytes")); err != nil {
+			t.Fatalf("part.Write() error = %v", err)
+		}
+	}
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("writer.Close() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, cfg.WebhookPath, body)
+	req.Header.Set("Authorization", "Bearer token-123")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusAccepted)
+	}
+	if len(sender.messages) != 1 {
+		t.Fatalf("forwarded messages = %d, want 1", len(sender.messages))
+	}
+	if len(sender.photos) != maxPhotoCount {
+		t.Fatalf("forwarded photos = %d, want %d", len(sender.photos), maxPhotoCount)
 	}
 }
 
@@ -210,6 +268,45 @@ func TestWebhookHandlerSendFailure(t *testing.T) {
 
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadGateway)
+	}
+}
+
+func TestWebhookHandlerSendPhotosFailure(t *testing.T) {
+	cfg := newTestForwarderConfig()
+	sender := &fakeMessageSender{sendPhotosErr: errors.New("telegram unavailable")}
+	h, err := NewWebhookHandler(cfg, sender)
+	if err != nil {
+		t.Fatalf("NewWebhookHandler() error = %v", err)
+	}
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	if err := writer.WriteField("payload", `{"event_type":"reciprocal_like_final","raw_contact_url":"https://t.me/user1"}`); err != nil {
+		t.Fatalf("WriteField(payload) error = %v", err)
+	}
+	part, err := writer.CreateFormFile("photos", "photo.jpg")
+	if err != nil {
+		t.Fatalf("CreateFormFile() error = %v", err)
+	}
+	if _, err := part.Write([]byte("jpeg-bytes")); err != nil {
+		t.Fatalf("part.Write() error = %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("writer.Close() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, cfg.WebhookPath, body)
+	req.Header.Set("Authorization", "Bearer token-123")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadGateway)
+	}
+	if len(sender.messages) != 1 {
+		t.Fatalf("forwarded messages = %d, want 1", len(sender.messages))
 	}
 }
 

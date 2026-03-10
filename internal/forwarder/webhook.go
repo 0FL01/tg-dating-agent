@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"time"
@@ -16,10 +17,20 @@ const (
 	DatingInstanceHeader = "X-Dating-Instance-Name"
 	webhookTokenHeader   = "X-Forwarder-Webhook-Token"
 	maxWebhookBodyBytes  = 64 << 10
+	maxMultipartBodySize = 25 << 20
+	maxPhotoCount        = 10
+	maxPhotoBytes        = 2 << 20
 )
 
 type MessageSender interface {
 	SendMessage(ctx context.Context, text string) error
+	SendPhotos(ctx context.Context, photos []Photo) error
+}
+
+type Photo struct {
+	Filename    string
+	ContentType string
+	Data        []byte
 }
 
 type ReciprocalLikeFinalPayload struct {
@@ -91,22 +102,36 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, cfg *Config, sender M
 
 	contentType := strings.TrimSpace(r.Header.Get("Content-Type"))
 	mediaType, _, err := mime.ParseMediaType(contentType)
-	if err != nil || mediaType != "application/json" {
+	if err != nil {
 		http.Error(w, "unsupported media type", http.StatusUnsupportedMediaType)
 		return
 	}
 
-	var payload ReciprocalLikeFinalPayload
-	dec := json.NewDecoder(io.LimitReader(r.Body, maxWebhookBodyBytes))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&payload); err != nil {
-		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+	var (
+		payload ReciprocalLikeFinalPayload
+		photos  []Photo
+	)
+
+	switch mediaType {
+	case "application/json":
+		if err := decodePayloadJSON(io.LimitReader(r.Body, maxWebhookBodyBytes), &payload); err != nil {
+			http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+			return
+		}
+	case "multipart/form-data":
+		r.Body = http.MaxBytesReader(w, r.Body, maxMultipartBodySize)
+		multipartPayload, multipartPhotos, err := parseMultipartPayload(r)
+		if err != nil {
+			http.Error(w, "invalid multipart payload", http.StatusBadRequest)
+			return
+		}
+		payload = multipartPayload
+		photos = multipartPhotos
+	default:
+		http.Error(w, "unsupported media type", http.StatusUnsupportedMediaType)
 		return
 	}
-	if err := dec.Decode(&struct{}{}); err != io.EOF {
-		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
-		return
-	}
+
 	if err := payload.Validate(); err != nil {
 		http.Error(w, "invalid payload: "+err.Error(), http.StatusUnprocessableEntity)
 		return
@@ -117,9 +142,89 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, cfg *Config, sender M
 		http.Error(w, "failed to forward message", http.StatusBadGateway)
 		return
 	}
+	if len(photos) > 0 {
+		if err := sender.SendPhotos(r.Context(), photos); err != nil {
+			http.Error(w, "failed to forward photos", http.StatusBadGateway)
+			return
+		}
+	}
 
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte("forwarded"))
+}
+
+func parseMultipartPayload(r *http.Request) (ReciprocalLikeFinalPayload, []Photo, error) {
+	var payload ReciprocalLikeFinalPayload
+
+	if err := r.ParseMultipartForm(maxMultipartBodySize); err != nil {
+		return payload, nil, err
+	}
+	if r.MultipartForm != nil {
+		defer func() {
+			_ = r.MultipartForm.RemoveAll()
+		}()
+	}
+
+	payloadJSON := strings.TrimSpace(r.FormValue("payload"))
+	if payloadJSON == "" {
+		return payload, nil, fmt.Errorf("payload is required")
+	}
+	if err := decodePayloadJSON(strings.NewReader(payloadJSON), &payload); err != nil {
+		return payload, nil, err
+	}
+
+	var files []*multipart.FileHeader
+	if r.MultipartForm != nil {
+		files = r.MultipartForm.File["photos"]
+	}
+	if len(files) > maxPhotoCount {
+		files = files[:maxPhotoCount]
+	}
+
+	photos := make([]Photo, 0, len(files))
+	for _, fileHeader := range files {
+		file, err := fileHeader.Open()
+		if err != nil {
+			return payload, nil, fmt.Errorf("open photo %q: %w", fileHeader.Filename, err)
+		}
+
+		data, readErr := io.ReadAll(io.LimitReader(file, maxPhotoBytes+1))
+		closeErr := file.Close()
+		if readErr != nil {
+			return payload, nil, fmt.Errorf("read photo %q: %w", fileHeader.Filename, readErr)
+		}
+		if closeErr != nil {
+			return payload, nil, fmt.Errorf("close photo %q: %w", fileHeader.Filename, closeErr)
+		}
+		if len(data) > maxPhotoBytes {
+			return payload, nil, fmt.Errorf("photo %q is too large", fileHeader.Filename)
+		}
+
+		contentType := strings.TrimSpace(fileHeader.Header.Get("Content-Type"))
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+
+		photos = append(photos, Photo{
+			Filename:    fileHeader.Filename,
+			ContentType: contentType,
+			Data:        data,
+		})
+	}
+
+	return payload, photos, nil
+}
+
+func decodePayloadJSON(reader io.Reader, payload *ReciprocalLikeFinalPayload) error {
+	dec := json.NewDecoder(reader)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(payload); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("extra JSON value")
+	}
+	return nil
 }
 
 func isAuthorized(r *http.Request, expectedToken string) bool {

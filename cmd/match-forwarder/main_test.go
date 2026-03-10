@@ -57,6 +57,10 @@ func (noopSender) SendMessage(context.Context, string) error {
 	return nil
 }
 
+func (noopSender) SendPhotos(context.Context, []forwarder.Photo) error {
+	return nil
+}
+
 func minimalConfig() *forwarder.Config {
 	return &forwarder.Config{
 		BotToken:           "123456:token",
