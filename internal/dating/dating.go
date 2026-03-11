@@ -247,6 +247,10 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 		return nil
 	}
 
+	if h.state.GetState() == StateViewingProfiles && shouldRememberVisibleProfileTextFallback(m, text) {
+		h.rememberVisibleProfileTextFallback(text, m.ID)
+	}
+
 	if h.shouldRecoverFromStuck(m) {
 		log.Printf("[%s] Recovering viewing flow from interstitial message", h.Name())
 		if !h.state.Enqueue(ProfileJob{Type: "stuck_recovery", Message: m}) {
@@ -276,6 +280,26 @@ func (h *Handler) shouldRecoverFromStuck(m *telegram.NewMessage) bool {
 
 func isNonEmptyTextOnlyMessage(text string) bool {
 	return strings.TrimSpace(text) != ""
+}
+
+func shouldRememberVisibleProfileTextFallback(m *telegram.NewMessage, text string) bool {
+	if !isNonEmptyTextOnlyMessage(text) {
+		return false
+	}
+
+	if hasReplyMarkup(m) {
+		return false
+	}
+
+	if isMineMessage(text) || isReciprocalLikePrompt(text) || isDailyLimitMessage(text) {
+		return false
+	}
+
+	if strings.Contains(text, PatternViewProfiles) || strings.Contains(text, PatternWriteMessage) {
+		return false
+	}
+
+	return true
 }
 
 func isMineMessage(text string) bool {
@@ -1201,6 +1225,22 @@ func (h *Handler) rememberGroupedCaption(m *telegram.NewMessage, text string) {
 
 func (h *Handler) rememberVisibleProfileCard(profileText string, messageID int32) {
 	h.state.RememberVisibleProfileCard(profileText, messageID, time.Now())
+}
+
+func (h *Handler) rememberVisibleProfileTextFallback(profileText string, messageID int32) {
+	now := time.Now()
+	if previous, ok := h.state.GetLatestVisibleProfileCardBefore(messageID, now); ok {
+		if len(previous.MediaSource.AlbumMessages) > 0 {
+			h.state.RememberVisibleProfileAlbum(profileText, messageID, previous.MediaSource.AlbumMessages, now)
+			return
+		}
+		if previous.MediaSource.Message != nil {
+			h.state.RememberVisibleProfileMessage(profileText, messageID, previous.MediaSource.Message, now)
+			return
+		}
+	}
+
+	h.state.RememberVisibleProfileCard(profileText, messageID, now)
 }
 
 func (h *Handler) rememberVisibleProfileMessage(profileText string, messageID int32, m *telegram.NewMessage) {

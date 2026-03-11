@@ -497,6 +497,78 @@ func TestHandleViewingProfilesProfileActionKeyboardStillEnqueuesProfileMessage(t
 	}
 }
 
+func TestHandleViewingProfilesPlainTextWithoutMarkupRemembersVisibleProfileForReciprocalFinal(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+
+	profileText := "Anna, 27 - Loves books and coffee"
+	plainProfile := &telegram.NewMessage{ID: 410, Message: &telegram.MessageObj{
+		Message: profileText,
+		PeerID:  &telegram.PeerUser{UserID: h.chatID},
+	}}
+
+	if err := h.Handle(plainProfile); err != nil {
+		t.Fatalf("Handle(plain profile text) error = %v", err)
+	}
+
+	job := mustDequeueJob(t, h.state)
+	if job.Type != "stuck_recovery" || job.Message == nil || job.Message.ID != 410 {
+		t.Fatalf("queued job = %+v, want stuck_recovery job id 410", job)
+	}
+
+	var gotPayload ReciprocalLikeFinalPayload
+	deliverCalls := 0
+	h.deliverReciprocalLikeFinalFn = func(_ context.Context, payload ReciprocalLikeFinalPayload, _ []ReciprocalLikePhoto) error {
+		deliverCalls++
+		gotPayload = payload
+		return nil
+	}
+
+	startChatting := &telegram.NewMessage{ID: 411, Message: &telegram.MessageObj{Message: "Start chatting: https://t.me/final_user"}}
+	if err := h.Handle(startChatting); err != nil {
+		t.Fatalf("Handle(start chatting) error = %v", err)
+	}
+
+	if deliverCalls != 1 {
+		t.Fatalf("deliverReciprocalLikeFinalFn calls = %d, want 1", deliverCalls)
+	}
+	if gotPayload.ProfileText != profileText {
+		t.Fatalf("payload.ProfileText = %q, want %q", gotPayload.ProfileText, profileText)
+	}
+}
+
+func TestHandleViewingProfilesPlainTextFallbackPreservesExistingVisibleMediaSource(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+
+	mediaMessage := &telegram.NewMessage{ID: 500, Message: &telegram.MessageObj{
+		Message: "Old profile text",
+		Media:   &telegram.MessageMediaPhoto{},
+		PeerID:  &telegram.PeerUser{UserID: h.chatID},
+	}}
+	h.rememberVisibleProfileMessage("Old profile text", mediaMessage.ID, mediaMessage)
+
+	plainProfile := &telegram.NewMessage{ID: 501, Message: &telegram.MessageObj{
+		Message: "Updated profile text without keyboard",
+		PeerID:  &telegram.PeerUser{UserID: h.chatID},
+	}}
+
+	if err := h.Handle(plainProfile); err != nil {
+		t.Fatalf("Handle(plain profile fallback) error = %v", err)
+	}
+
+	entry, ok := h.state.GetLatestVisibleProfileCardBefore(999, time.Now())
+	if !ok {
+		t.Fatal("GetLatestVisibleProfileCardBefore() ok = false, want true")
+	}
+	if entry.ProfileText != plainProfile.Text() {
+		t.Fatalf("visible profile text = %q, want %q", entry.ProfileText, plainProfile.Text())
+	}
+	if entry.MediaSource.Message != mediaMessage {
+		t.Fatal("visible profile media source message was not preserved")
+	}
+}
+
 func TestProcessJobStuckRecoveryEscalationSequenceReachesStartFallback(t *testing.T) {
 	h := &Handler{chatID: 123456789, state: NewStateMachine()}
 	h.state.SetState(StateViewingProfiles)
