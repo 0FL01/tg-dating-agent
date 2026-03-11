@@ -8,6 +8,7 @@ import (
 
 	"github.com/0FL01/tg-dating-agent/internal/llm"
 	"github.com/0FL01/tg-dating-agent/internal/standalone"
+	"github.com/0FL01/tg-dating-agent/internal/storage"
 	"github.com/amarnathcjd/gogram/telegram"
 )
 
@@ -24,6 +25,22 @@ import (
 func NewStandaloneHandler(cfg *standalone.Config, tgClient *telegram.Client) *Handler {
 	client := llm.NewClient(cfg.OpenRouterAPIKey)
 	handler := NewHandler(cfg, client, tgClient)
+
+	if cfg != nil && cfg.DatingR2Enabled {
+		r2Store, err := storage.NewR2ObjectStore(storage.R2Config{
+			Bucket:          cfg.DatingR2Bucket,
+			Endpoint:        cfg.DatingR2Endpoint,
+			Region:          cfg.DatingR2Region,
+			AccessKeyID:     cfg.DatingR2AccessKeyID,
+			SecretAccessKey: cfg.DatingR2SecretAccessKey,
+			InstanceName:    cfg.DatingInstanceName,
+		})
+		if err != nil {
+			log.Printf("[dating] Profile dedupe storage disabled: %v", err)
+		} else {
+			handler.profileDedupe = NewProfileDedupeStore(r2Store, cfg.DatingProfileDedupTTL)
+		}
+	}
 
 	webhookClient, err := NewReciprocalLikeFinalWebhookClient(cfg)
 	if err != nil {

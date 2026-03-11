@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/0FL01/tg-dating-agent/internal/standalone"
 	"github.com/amarnathcjd/gogram/telegram"
@@ -209,5 +210,35 @@ func TestNewStandaloneHandler_WebhookEnabledDeliversPayload(t *testing.T) {
 	}
 	if gotPayload.DeeplinkText != "Hi there" {
 		t.Fatalf("payload.DeeplinkText = %q, want %q", gotPayload.DeeplinkText, "Hi there")
+	}
+}
+
+func TestNewStandaloneHandler_WiresProfileDedupeWhenR2Enabled(t *testing.T) {
+	cfg := &standalone.Config{
+		OpenRouterAPIKey:        "test-key",
+		DatingBotChatID:         123456789,
+		DatingModel:             "test-model",
+		DatingMBTIAllowlist:     []string{"INTJ"},
+		DatingProfileDedupTTL:   6 * time.Hour,
+		DatingR2Enabled:         true,
+		DatingR2Bucket:          "profiles",
+		DatingR2Endpoint:        "https://example.r2.cloudflarestorage.com",
+		DatingR2Region:          "auto",
+		DatingR2AccessKeyID:     "access",
+		DatingR2SecretAccessKey: "secret",
+		DatingInstanceName:      "instance-a",
+	}
+
+	handler := NewStandaloneHandler(cfg, nil)
+	if handler.profileDedupe == nil {
+		t.Fatal("profileDedupe = nil, want initialized dedupe store")
+	}
+
+	store, ok := handler.profileDedupe.(*ProfileDedupeStore)
+	if !ok {
+		t.Fatalf("profileDedupe type = %T, want *ProfileDedupeStore", handler.profileDedupe)
+	}
+	if store.ttl != cfg.DatingProfileDedupTTL {
+		t.Fatalf("profile dedupe ttl = %v, want %v", store.ttl, cfg.DatingProfileDedupTTL)
 	}
 }

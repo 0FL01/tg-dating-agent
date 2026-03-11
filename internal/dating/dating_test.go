@@ -73,6 +73,15 @@ type stubReplyAuditLogger struct {
 	err   error
 }
 
+type stubProfileDedupeStore struct {
+	mu          sync.Mutex
+	isActive    bool
+	isActiveErr error
+	markErr     error
+	activeCalls []string
+	markCalls   []string
+}
+
 func (s *stubReplyAuditLogger) Append(mbti, profileText, prompt, response string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -87,6 +96,44 @@ func (s *stubReplyAuditLogger) snapshotCalls() []auditCall {
 
 	out := make([]auditCall, len(s.calls))
 	copy(out, s.calls)
+	return out
+}
+
+func (s *stubProfileDedupeStore) IsActive(_ context.Context, profileHash string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.activeCalls = append(s.activeCalls, profileHash)
+	if s.isActiveErr != nil {
+		return false, s.isActiveErr
+	}
+
+	return s.isActive, nil
+}
+
+func (s *stubProfileDedupeStore) MarkProcessed(_ context.Context, profileHash string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.markCalls = append(s.markCalls, profileHash)
+	return s.markErr
+}
+
+func (s *stubProfileDedupeStore) snapshotActiveCalls() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]string, len(s.activeCalls))
+	copy(out, s.activeCalls)
+	return out
+}
+
+func (s *stubProfileDedupeStore) snapshotMarkCalls() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]string, len(s.markCalls))
+	copy(out, s.markCalls)
 	return out
 }
 
@@ -1470,6 +1517,114 @@ func TestGenerateAndSendLikeUsesProfileLLMCacheForAlbumWithStablePhotoOrdering(t
 
 	if got := summarizer.snapshotCallCount(); got != 2 {
 		t.Fatalf("SummarizeMultimodal calls = %d, want 2 (single MBTI+opener pass, cached second pass)", got)
+	}
+}
+
+func TestGenerateAndSendLikeDuplicateSkipsBeforeLLM(t *testing.T) {
+	ctx := context.Background()
+	dedupe := &stubProfileDedupeStore{isActive: true}
+	clicked := ""
+
+	h := &Handler{
+		state: NewStateMachine(),
+		config: &standalone.Config{
+			DatingMBTIPrompt:    "mbti prompt",
+			DatingMBTIAllowlist: []string{"INTJ"},
+		},
+		client:        &scriptedSummarizer{responses: []string{"INTJ", "generated"}},
+		profileDedupe: dedupe,
+		clickButtonFn: func(_ context.Context, button string) error {
+			clicked = button
+			return nil
+		},
+	}
+
+	profile := ProfileData{ProfileText: "duplicate profile", PhotoIdentifiers: []string{"10:20"}}
+	if err := h.generateAndSendLike(ctx, profile); err != nil {
+		t.Fatalf("generateAndSendLike() error = %v, want nil", err)
+	}
+
+	if clicked != ButtonDislike {
+		t.Fatalf("clicked button = %q, want %q", clicked, ButtonDislike)
+	}
+
+	if got := len(dedupe.snapshotActiveCalls()); got != 1 {
+		t.Fatalf("IsActive calls = %d, want 1", got)
+	}
+	if got := len(dedupe.snapshotMarkCalls()); got != 1 {
+		t.Fatalf("MarkProcessed calls = %d, want 1", got)
+	}
+
+	summarizer := h.client.(*scriptedSummarizer)
+	if got := summarizer.snapshotCallCount(); got != 0 {
+		t.Fatalf("SummarizeMultimodal calls = %d, want 0 on duplicate", got)
+	}
+}
+
+func TestGenerateAndSendLikeMarkProcessedBestEffortOnLikePath(t *testing.T) {
+	ctx := context.Background()
+	dedupe := &stubProfileDedupeStore{markErr: errors.New("mark failed")}
+	clicked := ""
+
+	h := &Handler{
+		state: NewStateMachine(),
+		config: &standalone.Config{
+			DatingMBTIPrompt:    "mbti prompt",
+			DatingMBTIAllowlist: []string{"INTJ"},
+		},
+		client: &scriptedSummarizer{
+			responses: []string{"INTJ", "generated"},
+		},
+		model:         "model",
+		prompt:        "prompt",
+		temperature:   0.2,
+		profileDedupe: dedupe,
+		clickButtonFn: func(_ context.Context, button string) error {
+			clicked = button
+			return nil
+		},
+	}
+
+	if err := h.generateAndSendLike(ctx, ProfileData{ProfileText: "fresh profile"}); err != nil {
+		t.Fatalf("generateAndSendLike() error = %v, want nil", err)
+	}
+
+	if clicked != ButtonLikeMessage {
+		t.Fatalf("clicked button = %q, want %q", clicked, ButtonLikeMessage)
+	}
+	if got := len(dedupe.snapshotMarkCalls()); got != 1 {
+		t.Fatalf("MarkProcessed calls = %d, want 1", got)
+	}
+}
+
+func TestProcessProfileLowQualityMarksProcessedAfterDislike(t *testing.T) {
+	ctx := context.Background()
+	dedupe := &stubProfileDedupeStore{}
+	clicked := ""
+
+	h := &Handler{
+		state: NewStateMachine(),
+		config: &standalone.Config{
+			DatingSkipLowQuality: true,
+			DatingMinBioLength:   100,
+		},
+		profileDedupe: dedupe,
+		clickButtonFn: func(_ context.Context, button string) error {
+			clicked = button
+			return nil
+		},
+	}
+
+	msg := &telegram.NewMessage{Message: &telegram.MessageObj{Message: "Name - short bio"}}
+	if err := h.processProfile(ctx, msg); err != nil {
+		t.Fatalf("processProfile() error = %v, want nil", err)
+	}
+
+	if clicked != ButtonDislike {
+		t.Fatalf("clicked button = %q, want %q", clicked, ButtonDislike)
+	}
+	if got := len(dedupe.snapshotMarkCalls()); got != 1 {
+		t.Fatalf("MarkProcessed calls = %d, want 1", got)
 	}
 }
 

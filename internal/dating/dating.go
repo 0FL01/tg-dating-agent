@@ -35,6 +35,7 @@ type Handler struct {
 	config                       *standalone.Config
 	client                       llm.MultimodalSummarizer
 	replyAudit                   replyAuditAppender
+	profileDedupe                profileDedupeChecker
 	tgClient                     *telegram.Client
 	state                        *StateMachine
 	chatID                       int64
@@ -58,6 +59,11 @@ type Handler struct {
 
 type replyAuditAppender interface {
 	Append(mbti, profileText, prompt, response string) error
+}
+
+type profileDedupeChecker interface {
+	IsActive(context.Context, string) (bool, error)
+	MarkProcessed(context.Context, string) error
 }
 
 // NewHandler creates a new dating handler
@@ -400,6 +406,7 @@ func isDailyLimitMessage(text string) bool {
 
 func (h *Handler) processProfile(ctx context.Context, m *telegram.NewMessage) error {
 	profileText := m.Text()
+	profileHash := buildProfileLLMCacheKey(profileText, photoIdentifiersFromMessage(m))
 	bioText := extractBioText(profileText)
 	bioLen := utf8.RuneCountInString(bioText)
 
@@ -409,7 +416,7 @@ func (h *Handler) processProfile(ctx context.Context, m *telegram.NewMessage) er
 		if !h.state.SetStateIfNotStopped(StateViewingProfiles) {
 			return nil
 		}
-		return h.clickButtonWithContext(ctx, ButtonDislike)
+		return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, profileHash)
 	}
 
 	if !h.state.SetStateIfNotStopped(StateViewingProfiles) {
@@ -457,6 +464,11 @@ func (h *Handler) generateAndSendLike(ctx context.Context, data ProfileData) err
 	}
 
 	cacheKey := buildProfileLLMCacheKey(data.ProfileText, data.PhotoIdentifiers)
+	if h.isDuplicateProfileActive(ctx, cacheKey) {
+		log.Printf("[%s] Profile dedupe hit (key=%s), skipping before LLM", h.Name(), utils.Truncate(cacheKey, 12))
+		return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, cacheKey)
+	}
+
 	cacheKeyLog := cacheKey
 	if len(cacheKeyLog) > 12 {
 		cacheKeyLog = cacheKeyLog[:12]
@@ -477,19 +489,19 @@ func (h *Handler) generateAndSendLike(ctx context.Context, data ProfileData) err
 		mbtiRaw, err := h.client.SummarizeMultimodal(ctx, h.model, h.config.DatingMBTIPrompt, content, h.temperature)
 		if err != nil {
 			log.Printf("[%s] Failed to analyze MBTI: %v, skipping profile", h.Name(), err)
-			return h.clickButtonWithContext(ctx, ButtonDislike)
+			return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, cacheKey)
 		}
 
 		parsedMBTI, ok := parseMBTI(mbtiRaw)
 		if !ok {
 			log.Printf("[%s] Failed to parse MBTI from response %q, skipping profile", h.Name(), utils.Truncate(mbtiRaw, 60))
-			return h.clickButtonWithContext(ctx, ButtonDislike)
+			return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, cacheKey)
 		}
 		mbti = parsedMBTI
 
 		if !isMBTIAllowed(mbti, h.config.DatingMBTIAllowlist) {
 			log.Printf("[%s] MBTI %s is not in allowlist %v, skipping profile", h.Name(), mbti, h.config.DatingMBTIAllowlist)
-			return h.clickButtonWithContext(ctx, ButtonDislike)
+			return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, cacheKey)
 		}
 
 		log.Printf("[%s] MBTI %s is allowed, generating reply", h.Name(), mbti)
@@ -500,7 +512,7 @@ func (h *Handler) generateAndSendLike(ctx context.Context, data ProfileData) err
 		generatedMsg, err = h.client.SummarizeMultimodal(ctx, h.model, h.prompt, content, h.temperature)
 		if err != nil {
 			log.Printf("[%s] Failed to generate message: %v", h.Name(), err)
-			return h.clickButtonWithContext(ctx, ButtonDislike)
+			return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, cacheKey)
 		}
 		h.appendReplyAudit(mbti, data.ProfileText, h.prompt, generatedMsg)
 
@@ -510,7 +522,7 @@ func (h *Handler) generateAndSendLike(ctx context.Context, data ProfileData) err
 
 	if !isMBTIAllowed(mbti, h.config.DatingMBTIAllowlist) {
 		log.Printf("[%s] MBTI %s is not in allowlist %v, skipping profile", h.Name(), mbti, h.config.DatingMBTIAllowlist)
-		return h.clickButtonWithContext(ctx, ButtonDislike)
+		return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, cacheKey)
 	}
 
 	log.Printf("[%s] MBTI %s is allowed, generating reply", h.Name(), mbti)
@@ -532,7 +544,7 @@ func (h *Handler) generateAndSendLike(ctx context.Context, data ProfileData) err
 		return nil
 	}
 
-	return h.clickButtonWithContext(ctx, ButtonLikeMessage)
+	return h.clickButtonAndMarkProcessed(ctx, ButtonLikeMessage, cacheKey)
 }
 
 func parseMBTI(response string) (string, bool) {
@@ -884,6 +896,40 @@ func (h *Handler) clickButtonWithContext(ctx context.Context, buttonText string)
 	return err
 }
 
+func (h *Handler) isDuplicateProfileActive(ctx context.Context, profileHash string) bool {
+	if h.profileDedupe == nil || strings.TrimSpace(profileHash) == "" {
+		return false
+	}
+
+	active, err := h.profileDedupe.IsActive(ctx, profileHash)
+	if err != nil {
+		log.Printf("[%s] Profile dedupe check failed for key=%s: %v", h.Name(), utils.Truncate(profileHash, 12), err)
+		return false
+	}
+
+	return active
+}
+
+func (h *Handler) markProfileProcessedBestEffort(ctx context.Context, profileHash string) {
+	if h.profileDedupe == nil || strings.TrimSpace(profileHash) == "" {
+		return
+	}
+
+	if err := h.profileDedupe.MarkProcessed(ctx, profileHash); err != nil {
+		log.Printf("[%s] Profile dedupe mark failed for key=%s: %v", h.Name(), utils.Truncate(profileHash, 12), err)
+	}
+}
+
+func (h *Handler) clickButtonAndMarkProcessed(ctx context.Context, buttonText, profileHash string) error {
+	err := h.clickButtonWithContext(ctx, buttonText)
+	if err != nil {
+		return err
+	}
+
+	h.markProfileProcessedBestEffort(ctx, profileHash)
+	return nil
+}
+
 func (h *Handler) Stop() {
 	log.Printf("[%s] Stopping...", h.Name())
 	h.Shutdown()
@@ -1051,6 +1097,7 @@ func (h *Handler) handleAlbumJob(ctx context.Context, a *telegram.Album) error {
 	h.cacheBotPeerFromAlbum(a)
 
 	profileText := h.resolveAlbumProfileText(a)
+	profileHash := buildProfileLLMCacheKey(profileText, photoIdentifiersFromAlbum(a))
 	bioText := extractBioText(profileText)
 	bioLen := utf8.RuneCountInString(bioText)
 
@@ -1060,7 +1107,7 @@ func (h *Handler) handleAlbumJob(ctx context.Context, a *telegram.Album) error {
 		if !h.state.SetStateIfNotStopped(StateViewingProfiles) {
 			return nil
 		}
-		return h.clickButtonWithContext(ctx, ButtonDislike)
+		return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, profileHash)
 	}
 
 	if !h.state.SetStateIfNotStopped(StateViewingProfiles) {
