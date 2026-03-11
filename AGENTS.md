@@ -15,6 +15,7 @@ The default branch is `main`.
 
 ## 🏗 Project Structure
 
+```
 <root>/
 ├── cmd/
 │   ├── dating/
@@ -74,6 +75,7 @@ The default branch is `main`.
 ├── Dockerfile                   # Multi-stage build for Dating Agent (non-root user)
 ├── Dockerfile.forwarder         # Multi-stage build for Match Forwarder (non-root user)
 └── env.example                  # Environment variables template
+```
 
 ### Key Modules
 - **dating**: Profile queue (buffer 50), worker goroutine, MBTI filtering, message generation workflow, retry logic, button detection; own-profile skip via correlated context (message-id + TTL) and startup fallback (90s TTL); recovery jobs (menu_recovery, stuck_recovery) with deduplication; deterministic album text binding (photo caption preference, message ID ordering); outbound webhook delivery for reciprocal-like events; reply audit logging (local JSONL + R2 chunk objects under `audit/replies/YYYY/MM/DD/...jsonl`); persistent profile dedupe via object storage keys `profile-dedupe/<hash>.json` with TTL; profile LLM cache (1000 entries); reciprocal-like context (64 entries, 30min TTL)
