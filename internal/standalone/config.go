@@ -41,6 +41,13 @@ type Config struct {
 	DatingMatchWebhookToken   string
 	DatingMatchWebhookTimeout time.Duration
 	DatingInstanceName        string
+	DatingProfileDedupTTL     time.Duration
+	DatingR2Enabled           bool
+	DatingR2Bucket            string
+	DatingR2Endpoint          string
+	DatingR2Region            string
+	DatingR2AccessKeyID       string
+	DatingR2SecretAccessKey   string
 }
 
 // Default values for Dating configuration.
@@ -54,6 +61,8 @@ const (
 	DefaultDatingMinBioLength              = 50
 	DefaultDatingReplyAuditLogPath         = "/app/logs/replies.jsonl"
 	DefaultDatingMatchWebhookTimeout       = 5 * time.Second
+	DefaultDatingProfileDedupTTL           = 72 * time.Hour
+	DefaultDatingR2Region                  = "auto"
 	DefaultOpenRouterModel                 = "google/gemini-2.5-flash"
 	DefaultSessionPath                     = "session.dat"
 )
@@ -206,12 +215,52 @@ func Load() (*Config, error) {
 	// Dating: Reciprocal-like webhook integration
 	datingMatchWebhookURL, _ := os.LookupEnv("DATING_MATCH_WEBHOOK_URL")
 	datingMatchWebhookToken, _ := os.LookupEnv("DATING_MATCH_WEBHOOK_TOKEN")
-	datingInstanceName, _ := os.LookupEnv("DATING_INSTANCE_NAME")
+	datingInstanceName := strings.TrimSpace(os.Getenv("DATING_INSTANCE_NAME"))
 
 	datingMatchWebhookTimeout := DefaultDatingMatchWebhookTimeout
 	if v := os.Getenv("DATING_MATCH_WEBHOOK_TIMEOUT"); v != "" {
 		if parsed, err := time.ParseDuration(v); err == nil {
 			datingMatchWebhookTimeout = parsed
+		}
+	}
+
+	datingProfileDedupTTL := DefaultDatingProfileDedupTTL
+	if v := strings.TrimSpace(os.Getenv("DATING_PROFILE_DEDUP_TTL")); v != "" {
+		parsed, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("DATING_PROFILE_DEDUP_TTL must be a valid duration: %w", err)
+		}
+		if parsed <= 0 {
+			return nil, fmt.Errorf("DATING_PROFILE_DEDUP_TTL must be positive")
+		}
+		datingProfileDedupTTL = parsed
+	}
+
+	datingR2Bucket := strings.TrimSpace(os.Getenv("DATING_R2_BUCKET"))
+	datingR2Endpoint := strings.TrimSpace(os.Getenv("DATING_R2_ENDPOINT"))
+	datingR2Region := strings.TrimSpace(os.Getenv("DATING_R2_REGION"))
+	if datingR2Region == "" {
+		datingR2Region = DefaultDatingR2Region
+	}
+	datingR2AccessKeyID := strings.TrimSpace(os.Getenv("DATING_R2_ACCESS_KEY_ID"))
+	datingR2SecretAccessKey := strings.TrimSpace(os.Getenv("DATING_R2_SECRET_ACCESS_KEY"))
+
+	datingR2Enabled := datingR2Bucket != "" || datingR2Endpoint != "" || datingR2AccessKeyID != "" || datingR2SecretAccessKey != ""
+	if datingR2Enabled {
+		if datingR2Bucket == "" {
+			return nil, fmt.Errorf("DATING_R2_BUCKET is required when R2 config is enabled")
+		}
+		if datingR2Endpoint == "" {
+			return nil, fmt.Errorf("DATING_R2_ENDPOINT is required when R2 config is enabled")
+		}
+		if datingR2AccessKeyID == "" {
+			return nil, fmt.Errorf("DATING_R2_ACCESS_KEY_ID is required when R2 config is enabled")
+		}
+		if datingR2SecretAccessKey == "" {
+			return nil, fmt.Errorf("DATING_R2_SECRET_ACCESS_KEY is required when R2 config is enabled")
+		}
+		if datingInstanceName == "" {
+			return nil, fmt.Errorf("DATING_INSTANCE_NAME is required when R2 config is enabled")
 		}
 	}
 
@@ -238,6 +287,13 @@ func Load() (*Config, error) {
 		DatingMatchWebhookToken:   datingMatchWebhookToken,
 		DatingMatchWebhookTimeout: datingMatchWebhookTimeout,
 		DatingInstanceName:        datingInstanceName,
+		DatingProfileDedupTTL:     datingProfileDedupTTL,
+		DatingR2Enabled:           datingR2Enabled,
+		DatingR2Bucket:            datingR2Bucket,
+		DatingR2Endpoint:          datingR2Endpoint,
+		DatingR2Region:            datingR2Region,
+		DatingR2AccessKeyID:       datingR2AccessKeyID,
+		DatingR2SecretAccessKey:   datingR2SecretAccessKey,
 	}, nil
 }
 

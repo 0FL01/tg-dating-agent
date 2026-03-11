@@ -167,6 +167,27 @@ func TestLoadDatingDefaults(t *testing.T) {
 	if cfg.DatingInstanceName != "" {
 		t.Errorf("DatingInstanceName = %q, want empty", cfg.DatingInstanceName)
 	}
+	if cfg.DatingProfileDedupTTL != DefaultDatingProfileDedupTTL {
+		t.Errorf("DatingProfileDedupTTL = %v, want %v", cfg.DatingProfileDedupTTL, DefaultDatingProfileDedupTTL)
+	}
+	if cfg.DatingR2Enabled {
+		t.Errorf("DatingR2Enabled = %v, want false", cfg.DatingR2Enabled)
+	}
+	if cfg.DatingR2Bucket != "" {
+		t.Errorf("DatingR2Bucket = %q, want empty", cfg.DatingR2Bucket)
+	}
+	if cfg.DatingR2Endpoint != "" {
+		t.Errorf("DatingR2Endpoint = %q, want empty", cfg.DatingR2Endpoint)
+	}
+	if cfg.DatingR2Region != DefaultDatingR2Region {
+		t.Errorf("DatingR2Region = %q, want %q", cfg.DatingR2Region, DefaultDatingR2Region)
+	}
+	if cfg.DatingR2AccessKeyID != "" {
+		t.Errorf("DatingR2AccessKeyID = %q, want empty", cfg.DatingR2AccessKeyID)
+	}
+	if cfg.DatingR2SecretAccessKey != "" {
+		t.Errorf("DatingR2SecretAccessKey = %q, want empty", cfg.DatingR2SecretAccessKey)
+	}
 	if cfg.DatingSkipLowQuality != false {
 		t.Errorf("DatingSkipLowQuality = %v, want false", cfg.DatingSkipLowQuality)
 	}
@@ -191,6 +212,12 @@ func TestLoadDatingCustomValues(t *testing.T) {
 	t.Setenv("DATING_MATCH_WEBHOOK_TOKEN", "secret-token")
 	t.Setenv("DATING_MATCH_WEBHOOK_TIMEOUT", "2s")
 	t.Setenv("DATING_INSTANCE_NAME", "prod-a")
+	t.Setenv("DATING_PROFILE_DEDUP_TTL", "24h")
+	t.Setenv("DATING_R2_BUCKET", "profiles-cache")
+	t.Setenv("DATING_R2_ENDPOINT", "https://example.r2.cloudflarestorage.com")
+	t.Setenv("DATING_R2_REGION", "eu")
+	t.Setenv("DATING_R2_ACCESS_KEY_ID", "AKIAR2")
+	t.Setenv("DATING_R2_SECRET_ACCESS_KEY", "secret-r2")
 
 	cfg, err := Load()
 	if err != nil {
@@ -242,6 +269,72 @@ func TestLoadDatingCustomValues(t *testing.T) {
 	}
 	if cfg.DatingInstanceName != "prod-a" {
 		t.Errorf("DatingInstanceName = %q, want %q", cfg.DatingInstanceName, "prod-a")
+	}
+	if cfg.DatingProfileDedupTTL != 24*time.Hour {
+		t.Errorf("DatingProfileDedupTTL = %v, want 24h", cfg.DatingProfileDedupTTL)
+	}
+	if !cfg.DatingR2Enabled {
+		t.Errorf("DatingR2Enabled = %v, want true", cfg.DatingR2Enabled)
+	}
+	if cfg.DatingR2Bucket != "profiles-cache" {
+		t.Errorf("DatingR2Bucket = %q, want %q", cfg.DatingR2Bucket, "profiles-cache")
+	}
+	if cfg.DatingR2Endpoint != "https://example.r2.cloudflarestorage.com" {
+		t.Errorf("DatingR2Endpoint = %q, want %q", cfg.DatingR2Endpoint, "https://example.r2.cloudflarestorage.com")
+	}
+	if cfg.DatingR2Region != "eu" {
+		t.Errorf("DatingR2Region = %q, want %q", cfg.DatingR2Region, "eu")
+	}
+	if cfg.DatingR2AccessKeyID != "AKIAR2" {
+		t.Errorf("DatingR2AccessKeyID = %q, want %q", cfg.DatingR2AccessKeyID, "AKIAR2")
+	}
+	if cfg.DatingR2SecretAccessKey != "secret-r2" {
+		t.Errorf("DatingR2SecretAccessKey = %q, want %q", cfg.DatingR2SecretAccessKey, "secret-r2")
+	}
+}
+
+func TestLoadDatingProfileDedupTTLInvalid(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("DATING_PROFILE_DEDUP_TTL", "bad")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for invalid DATING_PROFILE_DEDUP_TTL")
+	}
+	if !contains(err.Error(), "DATING_PROFILE_DEDUP_TTL") {
+		t.Errorf("error should mention DATING_PROFILE_DEDUP_TTL: %v", err)
+	}
+}
+
+func TestLoadDatingR2RequiresInstanceName(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("DATING_R2_BUCKET", "profiles-cache")
+	t.Setenv("DATING_R2_ENDPOINT", "https://example.r2.cloudflarestorage.com")
+	t.Setenv("DATING_R2_ACCESS_KEY_ID", "AKIAR2")
+	t.Setenv("DATING_R2_SECRET_ACCESS_KEY", "secret-r2")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error when DATING_INSTANCE_NAME is missing and R2 is enabled")
+	}
+	if !contains(err.Error(), "DATING_INSTANCE_NAME") {
+		t.Errorf("error should mention DATING_INSTANCE_NAME: %v", err)
+	}
+}
+
+func TestLoadDatingR2RequiresAllFields(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("DATING_INSTANCE_NAME", "prod-a")
+	t.Setenv("DATING_R2_BUCKET", "profiles-cache")
+	t.Setenv("DATING_R2_ACCESS_KEY_ID", "AKIAR2")
+	t.Setenv("DATING_R2_SECRET_ACCESS_KEY", "secret-r2")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error when DATING_R2_ENDPOINT is missing and R2 is enabled")
+	}
+	if !contains(err.Error(), "DATING_R2_ENDPOINT") {
+		t.Errorf("error should mention DATING_R2_ENDPOINT: %v", err)
 	}
 }
 
