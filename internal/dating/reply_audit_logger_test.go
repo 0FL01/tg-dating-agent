@@ -15,7 +15,7 @@ func TestReplyAuditLoggerAppendWritesValidJSONLine(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "audit", "reply.jsonl")
 	logger := NewReplyAuditLogger(logPath)
 
-	if err := logger.Append("INTJ", "hello", "hi there"); err != nil {
+	if err := logger.Append("INTJ", "Alice - bio", "hello", "hi there"); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 
@@ -36,6 +36,9 @@ func TestReplyAuditLoggerAppendWritesValidJSONLine(t *testing.T) {
 
 	if rec.MBTI != "INTJ" {
 		t.Fatalf("mbti = %q, want %q", rec.MBTI, "INTJ")
+	}
+	if rec.ProfileText != "Alice - bio" {
+		t.Fatalf("profile_text = %q, want %q", rec.ProfileText, "Alice - bio")
 	}
 	if rec.Prompt != "hello" {
 		t.Fatalf("prompt = %q, want %q", rec.Prompt, "hello")
@@ -58,10 +61,10 @@ func TestReplyAuditLoggerAppendAppendsMultipleEntries(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "reply.jsonl")
 	logger := NewReplyAuditLogger(logPath)
 
-	if err := logger.Append("INTJ", "prompt 1", "response 1"); err != nil {
+	if err := logger.Append("INTJ", "bio 1", "prompt 1", "response 1"); err != nil {
 		t.Fatalf("first Append() error = %v", err)
 	}
-	if err := logger.Append("INFJ", "prompt 2", "response 2"); err != nil {
+	if err := logger.Append("INFJ", "bio 2", "prompt 2", "response 2"); err != nil {
 		t.Fatalf("second Append() error = %v", err)
 	}
 
@@ -79,16 +82,16 @@ func TestReplyAuditLoggerAppendAppendsMultipleEntries(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
 		t.Fatalf("first line unmarshal error = %v", err)
 	}
-	if first.MBTI != "INTJ" || first.Prompt != "prompt 1" || first.Response != "response 1" {
-		t.Fatalf("first record = %+v, want mbti/prompt/response for first append", first)
+	if first.MBTI != "INTJ" || first.ProfileText != "bio 1" || first.Prompt != "prompt 1" || first.Response != "response 1" {
+		t.Fatalf("first record = %+v, want mbti/profile_text/prompt/response for first append", first)
 	}
 
 	var second replyAuditRecord
 	if err := json.Unmarshal([]byte(lines[1]), &second); err != nil {
 		t.Fatalf("second line unmarshal error = %v", err)
 	}
-	if second.MBTI != "INFJ" || second.Prompt != "prompt 2" || second.Response != "response 2" {
-		t.Fatalf("second record = %+v, want mbti/prompt/response for second append", second)
+	if second.MBTI != "INFJ" || second.ProfileText != "bio 2" || second.Prompt != "prompt 2" || second.Response != "response 2" {
+		t.Fatalf("second record = %+v, want mbti/profile_text/prompt/response for second append", second)
 	}
 }
 
@@ -96,7 +99,7 @@ func TestReplyAuditLoggerAppendReturnsErrorOnOpenFailure(t *testing.T) {
 	dirPath := t.TempDir()
 	logger := NewReplyAuditLogger(dirPath)
 
-	if err := logger.Append("INTJ", "prompt", "response"); err == nil {
+	if err := logger.Append("INTJ", "bio", "prompt", "response"); err == nil {
 		t.Fatal("Append() error = nil, want non-nil")
 	}
 }
@@ -114,7 +117,7 @@ func TestReplyAuditLoggerAppendConcurrentWrites(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := logger.Append("INTJ", "prompt "+strconv.Itoa(i), "response"); err != nil {
+			if err := logger.Append("INTJ", "bio "+strconv.Itoa(i), "prompt "+strconv.Itoa(i), "response"); err != nil {
 				errCh <- err
 			}
 		}()
@@ -142,8 +145,8 @@ func TestReplyAuditLoggerAppendConcurrentWrites(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			t.Fatalf("line %d unmarshal error = %v", idx, err)
 		}
-		if rec.MBTI != "INTJ" || rec.Response != "response" {
-			t.Fatalf("line %d record = %+v, want mbti INTJ and response response", idx, rec)
+		if rec.MBTI != "INTJ" || !strings.HasPrefix(rec.ProfileText, "bio ") || rec.Response != "response" {
+			t.Fatalf("line %d record = %+v, want mbti INTJ, profile_text with bio prefix, and response response", idx, rec)
 		}
 	}
 }

@@ -15,17 +15,18 @@ type ReplyAuditLogger struct {
 }
 
 type replyAuditRecord struct {
-	Timestamp string `json:"timestamp"`
-	MBTI      string `json:"mbti"`
-	Prompt    string `json:"prompt"`
-	Response  string `json:"response"`
+	Timestamp   string `json:"timestamp"`
+	MBTI        string `json:"mbti"`
+	ProfileText string `json:"profile_text"`
+	Prompt      string `json:"prompt"`
+	Response    string `json:"response"`
 }
 
 func NewReplyAuditLogger(path string) *ReplyAuditLogger {
 	return &ReplyAuditLogger{path: path}
 }
 
-func (l *ReplyAuditLogger) Append(mbti, prompt, response string) error {
+func (l *ReplyAuditLogger) Append(mbti, profileText, prompt, response string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -40,10 +41,11 @@ func (l *ReplyAuditLogger) Append(mbti, prompt, response string) error {
 	defer f.Close()
 
 	rec := replyAuditRecord{
-		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		MBTI:      mbti,
-		Prompt:    prompt,
-		Response:  response,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339Nano),
+		MBTI:        mbti,
+		ProfileText: profileText,
+		Prompt:      prompt,
+		Response:    response,
 	}
 
 	if err := json.NewEncoder(f).Encode(rec); err != nil {

@@ -61,9 +61,10 @@ func (s *scriptedSummarizer) SummarizeMultimodal(_ context.Context, _ string, pr
 }
 
 type auditCall struct {
-	mbti     string
-	prompt   string
-	response string
+	mbti        string
+	profileText string
+	prompt      string
+	response    string
 }
 
 type stubReplyAuditLogger struct {
@@ -72,11 +73,11 @@ type stubReplyAuditLogger struct {
 	err   error
 }
 
-func (s *stubReplyAuditLogger) Append(mbti, prompt, response string) error {
+func (s *stubReplyAuditLogger) Append(mbti, profileText, prompt, response string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.calls = append(s.calls, auditCall{mbti: mbti, prompt: prompt, response: response})
+	s.calls = append(s.calls, auditCall{mbti: mbti, profileText: profileText, prompt: prompt, response: response})
 	return s.err
 }
 
@@ -1316,8 +1317,8 @@ func TestGenerateAndSendLikeAppendsReplyAudit(t *testing.T) {
 		t.Fatalf("reply audit call count = %d, want 1", len(calls))
 	}
 
-	if calls[0].mbti != "INTJ" || calls[0].prompt != "reply prompt" || calls[0].response != "generated" {
-		t.Fatalf("reply audit call = %+v, want mbti=%q prompt=%q response=%q", calls[0], "INTJ", "reply prompt", "generated")
+	if calls[0].mbti != "INTJ" || calls[0].profileText != "bio" || calls[0].prompt != "reply prompt" || calls[0].response != "generated" {
+		t.Fatalf("reply audit call = %+v, want mbti=%q profile_text=%q prompt=%q response=%q", calls[0], "INTJ", "bio", "reply prompt", "generated")
 	}
 }
 
@@ -1503,8 +1504,8 @@ func TestRetryGenerateMessageAppendsReplyAudit(t *testing.T) {
 		t.Fatalf("reply audit call count = %d, want 1", len(calls))
 	}
 
-	if calls[0].mbti != "INFJ" || calls[0].prompt != TooShortRetryPrompt || calls[0].response != "retry generated" {
-		t.Fatalf("reply audit call = %+v, want mbti=%q prompt=%q response=%q", calls[0], "INFJ", TooShortRetryPrompt, "retry generated")
+	if calls[0].mbti != "INFJ" || calls[0].profileText != "bio" || calls[0].prompt != TooShortRetryPrompt || calls[0].response != "retry generated" {
+		t.Fatalf("reply audit call = %+v, want mbti=%q profile_text=%q prompt=%q response=%q", calls[0], "INFJ", "bio", TooShortRetryPrompt, "retry generated")
 	}
 }
 

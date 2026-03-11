@@ -57,7 +57,7 @@ type Handler struct {
 }
 
 type replyAuditAppender interface {
-	Append(mbti, prompt, response string) error
+	Append(mbti, profileText, prompt, response string) error
 }
 
 // NewHandler creates a new dating handler
@@ -502,7 +502,7 @@ func (h *Handler) generateAndSendLike(ctx context.Context, data ProfileData) err
 			log.Printf("[%s] Failed to generate message: %v", h.Name(), err)
 			return h.clickButtonWithContext(ctx, ButtonDislike)
 		}
-		h.appendReplyAudit(mbti, h.prompt, generatedMsg)
+		h.appendReplyAudit(mbti, data.ProfileText, h.prompt, generatedMsg)
 
 		h.state.SetProfileLLMCache(cacheKey, mbti, generatedMsg)
 		log.Printf("[%s] Profile LLM cache stored (key=%s)", h.Name(), cacheKeyLog)
@@ -751,7 +751,7 @@ func (h *Handler) retryGenerateMessage(ctx context.Context, retryType RetryType)
 		log.Printf("[%s] Failed to regenerate message: %v, using fallback", h.Name(), err)
 		return h.handleMaxRetriesReached(ctx, retryType, pendingMsg)
 	}
-	h.appendReplyAudit(profileData.MBTI, retryPrompt, generatedMsg)
+	h.appendReplyAudit(profileData.MBTI, profileData.ProfileText, retryPrompt, generatedMsg)
 
 	log.Printf("[%s] Regenerated message (attempt %d): %s", h.Name(), retryCount, utils.Truncate(generatedMsg, 100))
 	if h.shouldStopProcessing(ctx) {
@@ -846,12 +846,12 @@ func truncateMessage(msg string, maxLen int) string {
 	return string(truncatedRunes)
 }
 
-func (h *Handler) appendReplyAudit(mbti, prompt, response string) {
+func (h *Handler) appendReplyAudit(mbti, profileText, prompt, response string) {
 	if h.replyAudit == nil {
 		return
 	}
 
-	if err := h.replyAudit.Append(mbti, prompt, response); err != nil {
+	if err := h.replyAudit.Append(mbti, profileText, prompt, response); err != nil {
 		log.Printf("[%s] Reply audit append failed: %v", h.Name(), err)
 	}
 }
