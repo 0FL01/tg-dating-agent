@@ -1699,6 +1699,36 @@ func TestHandlePausedSkipsGenericRecovery(t *testing.T) {
 	}
 }
 
+func TestHandlePausedStillProcessesStartChattingFinal(t *testing.T) {
+	h := &Handler{state: NewStateMachine()}
+	h.state.SetState(StateViewingProfiles)
+	h.state.PauseFor(time.Hour)
+
+	deliverCalls := 0
+	h.deliverReciprocalLikeFinalFn = func(_ context.Context, _ ReciprocalLikeFinalPayload, _ []ReciprocalLikePhoto) error {
+		deliverCalls++
+		return nil
+	}
+
+	err := h.Handle(&telegram.NewMessage{Message: &telegram.MessageObj{Message: "Start chatting: https://t.me/final_user"}})
+	if err != nil {
+		t.Fatalf("Handle() error = %v, want nil", err)
+	}
+
+	if deliverCalls != 1 {
+		t.Fatalf("deliverReciprocalLikeFinalFn calls = %d, want 1", deliverCalls)
+	}
+
+	if got := h.state.GetState(); got != StateViewingProfiles {
+		t.Fatalf("state = %v, want %v", got, StateViewingProfiles)
+	}
+
+	paused, resumed, until := h.state.CheckPause(time.Now())
+	if !paused || resumed || until.IsZero() {
+		t.Fatalf("CheckPause(now) = (%v, %v, %v), want (true, false, non-zero)", paused, resumed, until)
+	}
+}
+
 func TestHandleDailyLimitTakesPrecedenceOverViewProfilesAndRecovery(t *testing.T) {
 	h := &Handler{state: NewStateMachine()}
 	h.state.SetState(StateViewingProfiles)

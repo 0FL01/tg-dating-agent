@@ -143,11 +143,15 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 		return nil
 	}
 
+	text := m.Text()
+	if isStartChattingMessage(text) {
+		return h.handleReciprocalLikeFinalMessage(m)
+	}
+
 	if h.isPaused() {
 		return nil
 	}
 
-	text := m.Text()
 	h.rememberGroupedCaption(m, text)
 	log.Printf("[%s] Received message: %s...", h.Name(), utils.Truncate(text, 50))
 
@@ -178,10 +182,6 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 
 	if strings.Contains(text, PatternWriteMessage) {
 		return h.sendPendingMessage(m)
-	}
-
-	if isStartChattingMessage(text) {
-		return h.handleReciprocalLikeFinalMessage(m)
 	}
 
 	if strings.Contains(text, PatternViewProfiles) {
