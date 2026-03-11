@@ -1,7 +1,11 @@
 package dating
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,6 +14,51 @@ import (
 	"testing"
 	"time"
 )
+
+type stubReplyAuditObjectStore struct {
+	mu          sync.Mutex
+	putCalls    []stubPutCall
+	putErr      error
+	putContexts []context.Context
+}
+
+type stubPutCall struct {
+	key         string
+	contentType string
+	body        []byte
+}
+
+func (s *stubReplyAuditObjectStore) PutObject(ctx context.Context, key string, body io.Reader, contentType string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	payload, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+
+	s.putCalls = append(s.putCalls, stubPutCall{key: key, contentType: contentType, body: payload})
+	s.putContexts = append(s.putContexts, ctx)
+
+	if s.putErr != nil {
+		return s.putErr
+	}
+
+	return nil
+}
+
+func (s *stubReplyAuditObjectStore) GetObject(context.Context, string) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(nil)), nil
+}
+
+func (s *stubReplyAuditObjectStore) snapshotCalls() []stubPutCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]stubPutCall, len(s.putCalls))
+	copy(out, s.putCalls)
+	return out
+}
 
 func TestReplyAuditLoggerAppendWritesValidJSONLine(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "audit", "reply.jsonl")
@@ -148,5 +197,124 @@ func TestReplyAuditLoggerAppendConcurrentWrites(t *testing.T) {
 		if rec.MBTI != "INTJ" || !strings.HasPrefix(rec.ProfileText, "bio ") || rec.Response != "response" {
 			t.Fatalf("line %d record = %+v, want mbti INTJ, profile_text with bio prefix, and response response", idx, rec)
 		}
+	}
+}
+
+func TestReplyAuditR2AppenderAppendWritesJSONLChunk(t *testing.T) {
+	store := &stubReplyAuditObjectStore{}
+	appender := NewReplyAuditR2Appender(store)
+	appender.now = func() time.Time {
+		return time.Date(2026, time.March, 11, 9, 10, 11, 123456789, time.UTC)
+	}
+
+	if err := appender.Append("INTJ", "Alice bio", "prompt", "hello"); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	calls := store.snapshotCalls()
+	if len(calls) != 1 {
+		t.Fatalf("put call count = %d, want 1", len(calls))
+	}
+
+	if calls[0].contentType != replyAuditR2ObjectContentType {
+		t.Fatalf("content type = %q, want %q", calls[0].contentType, replyAuditR2ObjectContentType)
+	}
+
+	if !strings.HasPrefix(calls[0].key, "audit/replies/2026/03/11/") {
+		t.Fatalf("key = %q, want prefix %q", calls[0].key, "audit/replies/2026/03/11/")
+	}
+	if !strings.HasSuffix(calls[0].key, "-000001.jsonl") {
+		t.Fatalf("key = %q, want suffix %q", calls[0].key, "-000001.jsonl")
+	}
+
+	if !strings.HasSuffix(string(calls[0].body), "\n") {
+		t.Fatalf("payload = %q, want trailing newline", string(calls[0].body))
+	}
+
+	var rec replyAuditRecord
+	if err := json.Unmarshal(bytes.TrimSpace(calls[0].body), &rec); err != nil {
+		t.Fatalf("payload unmarshal error = %v", err)
+	}
+
+	if rec.Timestamp != "2026-03-11T09:10:11.123456789Z" {
+		t.Fatalf("timestamp = %q, want %q", rec.Timestamp, "2026-03-11T09:10:11.123456789Z")
+	}
+	if rec.MBTI != "INTJ" || rec.ProfileText != "Alice bio" || rec.Prompt != "prompt" || rec.Response != "hello" {
+		t.Fatalf("record = %+v, want expected payload fields", rec)
+	}
+}
+
+func TestReplyAuditR2AppenderAppendGeneratesUniqueKeys(t *testing.T) {
+	store := &stubReplyAuditObjectStore{}
+	appender := NewReplyAuditR2Appender(store)
+	appender.now = func() time.Time {
+		return time.Date(2026, time.March, 11, 9, 10, 11, 123456789, time.UTC)
+	}
+
+	if err := appender.Append("INTJ", "bio1", "p1", "r1"); err != nil {
+		t.Fatalf("first Append() error = %v", err)
+	}
+	if err := appender.Append("INFJ", "bio2", "p2", "r2"); err != nil {
+		t.Fatalf("second Append() error = %v", err)
+	}
+
+	calls := store.snapshotCalls()
+	if len(calls) != 2 {
+		t.Fatalf("put call count = %d, want 2", len(calls))
+	}
+	if calls[0].key == calls[1].key {
+		t.Fatalf("keys are equal = %q, want unique keys", calls[0].key)
+	}
+	if !strings.HasSuffix(calls[1].key, "-000002.jsonl") {
+		t.Fatalf("second key = %q, want suffix %q", calls[1].key, "-000002.jsonl")
+	}
+}
+
+type compositeStubReplyAuditAppender struct {
+	mu    sync.Mutex
+	calls int
+	err   error
+}
+
+func (s *compositeStubReplyAuditAppender) Append(_, _, _, _ string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.calls++
+	return s.err
+}
+
+func (s *compositeStubReplyAuditAppender) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+func TestCompositeReplyAuditAppenderAppendAttemptsAllAppenders(t *testing.T) {
+	first := &compositeStubReplyAuditAppender{}
+	second := &compositeStubReplyAuditAppender{err: errors.New("r2 failed")}
+	third := &compositeStubReplyAuditAppender{}
+
+	composite := NewCompositeReplyAuditAppender(first, second, third)
+	if composite == nil {
+		t.Fatal("NewCompositeReplyAuditAppender() = nil, want non-nil")
+	}
+
+	err := composite.Append("INTJ", "bio", "prompt", "response")
+	if err == nil {
+		t.Fatal("Append() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "r2 failed") {
+		t.Fatalf("Append() error = %v, want contains %q", err, "r2 failed")
+	}
+
+	if first.callCount() != 1 {
+		t.Fatalf("first call count = %d, want 1", first.callCount())
+	}
+	if second.callCount() != 1 {
+		t.Fatalf("second call count = %d, want 1", second.callCount())
+	}
+	if third.callCount() != 1 {
+		t.Fatalf("third call count = %d, want 1", third.callCount())
 	}
 }

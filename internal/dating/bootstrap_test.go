@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -240,5 +241,59 @@ func TestNewStandaloneHandler_WiresProfileDedupeWhenR2Enabled(t *testing.T) {
 	}
 	if store.ttl != cfg.DatingProfileDedupTTL {
 		t.Fatalf("profile dedupe ttl = %v, want %v", store.ttl, cfg.DatingProfileDedupTTL)
+	}
+}
+
+func TestNewStandaloneHandler_WiresR2ReplyAuditUsingSharedStore(t *testing.T) {
+	cfg := &standalone.Config{
+		OpenRouterAPIKey:        "test-key",
+		DatingBotChatID:         123456789,
+		DatingModel:             "test-model",
+		DatingMBTIAllowlist:     []string{"INTJ"},
+		DatingReplyAuditLogPath: filepath.Join(t.TempDir(), "replies.jsonl"),
+		DatingProfileDedupTTL:   6 * time.Hour,
+		DatingR2Enabled:         true,
+		DatingR2Bucket:          "profiles",
+		DatingR2Endpoint:        "https://example.r2.cloudflarestorage.com",
+		DatingR2Region:          "auto",
+		DatingR2AccessKeyID:     "access",
+		DatingR2SecretAccessKey: "secret",
+		DatingInstanceName:      "instance-a",
+	}
+
+	handler := NewStandaloneHandler(cfg, nil)
+	if handler.replyAudit == nil {
+		t.Fatal("replyAudit = nil, want composed appender")
+	}
+
+	composite, ok := handler.replyAudit.(*CompositeReplyAuditAppender)
+	if !ok {
+		t.Fatalf("replyAudit type = %T, want *CompositeReplyAuditAppender", handler.replyAudit)
+	}
+
+	if len(composite.appenders) != 2 {
+		t.Fatalf("composite appender count = %d, want 2", len(composite.appenders))
+	}
+
+	localLogger, ok := composite.appenders[0].(*ReplyAuditLogger)
+	if !ok {
+		t.Fatalf("composite appenders[0] type = %T, want *ReplyAuditLogger", composite.appenders[0])
+	}
+	if localLogger.path != cfg.DatingReplyAuditLogPath {
+		t.Fatalf("local logger path = %q, want %q", localLogger.path, cfg.DatingReplyAuditLogPath)
+	}
+
+	r2Appender, ok := composite.appenders[1].(*ReplyAuditR2Appender)
+	if !ok {
+		t.Fatalf("composite appenders[1] type = %T, want *ReplyAuditR2Appender", composite.appenders[1])
+	}
+
+	store, ok := handler.profileDedupe.(*ProfileDedupeStore)
+	if !ok {
+		t.Fatalf("profileDedupe type = %T, want *ProfileDedupeStore", handler.profileDedupe)
+	}
+
+	if r2Appender.store != store.store {
+		t.Fatal("r2 reply audit appender does not reuse profile dedupe object store")
 	}
 }

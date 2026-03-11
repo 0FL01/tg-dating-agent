@@ -26,8 +26,10 @@ func NewStandaloneHandler(cfg *standalone.Config, tgClient *telegram.Client) *Ha
 	client := llm.NewClient(cfg.OpenRouterAPIKey)
 	handler := NewHandler(cfg, client, tgClient)
 
+	var r2Store *storage.R2ObjectStore
 	if cfg != nil && cfg.DatingR2Enabled {
-		r2Store, err := storage.NewR2ObjectStore(storage.R2Config{
+		var err error
+		r2Store, err = storage.NewR2ObjectStore(storage.R2Config{
 			Bucket:          cfg.DatingR2Bucket,
 			Endpoint:        cfg.DatingR2Endpoint,
 			Region:          cfg.DatingR2Region,
@@ -39,6 +41,7 @@ func NewStandaloneHandler(cfg *standalone.Config, tgClient *telegram.Client) *Ha
 			log.Printf("[dating] Profile dedupe storage disabled: %v", err)
 		} else {
 			handler.profileDedupe = NewProfileDedupeStore(r2Store, cfg.DatingProfileDedupTTL)
+			handler.replyAudit = NewCompositeReplyAuditAppender(handler.replyAudit, NewReplyAuditR2Appender(r2Store))
 		}
 	}
 
