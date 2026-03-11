@@ -29,9 +29,10 @@ The default branch is `main`.
 │   │   ├── state.go             # State machine with profile queue (buffer 50), worker goroutine, graceful shutdown
 │   │   ├── messages.go          # Constants: button texts, patterns, retry prompts
 │   │   ├── markup.go            # Reply markup helpers for button detection
+│   │   ├── profile_dedupe_store.go # Persistent profile dedupe store (R2/object storage, TTL-based)
 │   │   ├── webhook_client.go    # Outbound webhook client for reciprocal-like events
 │   │   ├── reciprocal_payload.go    # Reciprocal-like final payload builder, URL extraction, photo handling
-│   │   ├── reply_audit_logger.go    # JSONL audit logger for LLM replies
+│   │   ├── reply_audit_logger.go    # Local JSONL logger + R2 chunked audit appender for LLM replies
 │   │   ├── bootstrap.go         # Standalone handler wiring for external entrypoints
 │   │   ├── dating_test.go       # Tests for dating logic
 │   │   ├── state_test.go        # Tests for state machine
@@ -52,6 +53,10 @@ The default branch is `main`.
 │   │   ├── client.go            # OpenRouter API client with multimodal support
 │   │   ├── types.go             # Interfaces and content types
 │   │   └── client_test.go       # Tests for LLM client
+│   ├── storage/
+│   │   ├── storage.go           # Generic object storage interface + not found sentinel
+│   │   ├── r2.go                # Cloudflare R2 implementation with instance-scoped keys
+│   │   └── r2_test.go           # R2 client and key-scoping tests
 │   ├── standalone/
 │   │   ├── config.go            # Environment config loading with defaults
 │   │   ├── auth.go              # Telegram auth and session management
@@ -71,9 +76,10 @@ The default branch is `main`.
 └── env.example                  # Environment variables template
 
 ### Key Modules
-- **dating**: Profile queue (buffer 50), worker goroutine, MBTI filtering, message generation workflow, retry logic, button detection; own-profile skip via correlated context (message-id + TTL) and startup fallback (90s TTL); recovery jobs (menu_recovery, stuck_recovery) with deduplication; deterministic album text binding (photo caption preference, message ID ordering); outbound webhook delivery for reciprocal-like events; reply audit logging (JSONL); profile LLM cache (1000 entries); reciprocal-like context (64 entries, 30min TTL)
+- **dating**: Profile queue (buffer 50), worker goroutine, MBTI filtering, message generation workflow, retry logic, button detection; own-profile skip via correlated context (message-id + TTL) and startup fallback (90s TTL); recovery jobs (menu_recovery, stuck_recovery) with deduplication; deterministic album text binding (photo caption preference, message ID ordering); outbound webhook delivery for reciprocal-like events; reply audit logging (local JSONL + R2 chunk objects under `audit/replies/YYYY/MM/DD/...jsonl`); persistent profile dedupe via object storage keys `profile-dedupe/<hash>.json` with TTL; profile LLM cache (1000 entries); reciprocal-like context (64 entries, 30min TTL)
 - **forwarder**: HTTP webhook server for receiving match notifications from Dating Agent, Telegram Bot API sender for delivering messages to target chat; multipart photo support (max 10 photos, 2MB each); authentication via Bearer token or custom header; configurable timeout and bind address
 - **llm**: OpenRouter integration with image+text multimodal support
+- **storage**: Object storage abstraction and Cloudflare R2 adapter with per-instance key prefixing
 - **standalone**: Configuration, authentication, and bootstrap wiring
 - **tghelper**: Resilient Telegram API operations with retry logic, exponential backoff, jitter
 
@@ -87,7 +93,8 @@ The default branch is `main`.
 - **Cleanup Pattern**: Deferred cleanup for temporary photo downloads
 - **Bootstrap Pattern**: `bootstrap.go` provides standalone handler wiring for external entrypoints
 - **Button Detection**: `markup.go` detects reply keyboard buttons for flow recovery
-- **Caching Pattern**: Profile LLM cache (1000 entries max) for MBTI/opener results; reciprocal-like context (64 entries, 30min TTL) for payload enrichment
+- **Caching Pattern**: Profile LLM cache (1000 entries max) for MBTI/opener results; reciprocal-like context (64 entries, 30min TTL) for payload enrichment; persistent dedupe TTL via object storage records
+- **Object Storage Pattern**: Optional Cloudflare R2 backend with instance-scoped object keys for dedupe/audit persistence
 
 ### 2. Conventions
 - **Testing**: Unit tests in `*_test.go` files alongside source; race-focused tests in dating_test.go and state_test.go cover skip-context correlation, album text binding determinism, concurrent bot peer cache access, and bootstrap sequencing with state mutations
@@ -137,6 +144,7 @@ States: `idle` → `enqueue` (add to queue) → `viewing_profiles` → `waiting_
 - `DATING_SKIP_LOW_QUALITY` - Filter short bios (default: false)
 - `DATING_MIN_BIO_LENGTH` - Minimum bio length for low-quality filtering (default: 50)
 - `DATING_REPLY_AUDIT_LOG_PATH` - Reply audit JSONL path (default: /app/logs/replies.jsonl; empty disables)
+- `DATING_PROFILE_DEDUP_TTL` - TTL for persistent profile dedupe records (default: 72h)
 - `DATING_TEMPERATURE` - LLM temperature parameter (default: 0.7)
 - `DATING_PROMPT` - Custom prompt for message generation
 - `DATING_MBTI_PROMPT` - Custom prompt for MBTI analysis
@@ -145,7 +153,15 @@ States: `idle` → `enqueue` (add to queue) → `viewing_profiles` → `waiting_
 - `DATING_MATCH_WEBHOOK_URL` - Forwarder webhook endpoint (empty disables)
 - `DATING_MATCH_WEBHOOK_TOKEN` - Bearer token for webhook authentication
 - `DATING_MATCH_WEBHOOK_TIMEOUT` - HTTP timeout for webhook delivery (default: 5s)
-- `DATING_INSTANCE_NAME` - Instance identifier sent as `X-Dating-Instance-Name` header
+- `DATING_INSTANCE_NAME` - Instance identifier sent as `X-Dating-Instance-Name` header; required when R2 persistence is enabled
+
+#### Dating Agent R2 Persistence (optional)
+- `DATING_R2_BUCKET` - Cloudflare R2 bucket for persistent dedupe/audit objects
+- `DATING_R2_ENDPOINT` - R2 S3-compatible endpoint URL
+- `DATING_R2_REGION` - R2 region (default: auto)
+- `DATING_R2_ACCESS_KEY_ID` - R2 access key ID
+- `DATING_R2_SECRET_ACCESS_KEY` - R2 secret access key
+- When any R2 credential/bucket/endpoint variable is set, all R2 variables above and `DATING_INSTANCE_NAME` are required
 
 #### Match Forwarder Service
 - `FORWARDER_BOT_TOKEN` - Telegram Bot API token for sending messages (required)
