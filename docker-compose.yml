@@ -12,6 +12,8 @@ services:
       # Reply audit logs
       - ./logs:/app/logs
     restart: unless-stopped
+    # Host network mode for direct network access
+    network_mode: host
     # No ports needed - userbot connects outbound to Telegram
     # Read-only root filesystem for additional security
     read_only: true
