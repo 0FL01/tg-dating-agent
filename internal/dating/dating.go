@@ -24,11 +24,12 @@ import (
 	"github.com/amarnathcjd/gogram/telegram"
 )
 
-const DailyLimitPauseDuration = 24 * time.Hour
+const DailyLimitPauseDuration = 2 * time.Hour
 const stopCommandTimeout = 10 * time.Second
 
 // jitterRand is a thread-safe local random generator for jitter calculations
 var jitterRand = rand.New(rand.NewSource(time.Now().UnixNano()))
+var jitterRandMu sync.Mutex
 
 // Handler handles the dating bot automation
 type Handler struct {
@@ -55,6 +56,10 @@ type Handler struct {
 	lifecycleCtx                 context.Context
 	lifecycleCancel              context.CancelFunc
 	stopSleepOnce                sync.Once
+	pauseWakeMu                  sync.Mutex
+	pauseWakeTimer               *time.Timer
+	pauseWakeDeadline            time.Time
+	dailyLimitPauseFn            func() time.Duration
 }
 
 type replyAuditAppender interface {
@@ -124,11 +129,25 @@ func (h *Handler) Name() string {
 // getProcessingDelay returns delay with jitter for rate limiting
 // Minimum actionDelay + random 0 to jitterDelay (default: 15s + 0-5s = 15-20s)
 func (h *Handler) getProcessingDelay() time.Duration {
-	if h.jitterDelay <= 0 {
-		return h.actionDelay
+	return h.actionDelay + randomJitterDuration(h.jitterDelay)
+}
+
+func (h *Handler) getDailyLimitPauseDuration() time.Duration {
+	if h.dailyLimitPauseFn != nil {
+		return h.dailyLimitPauseFn()
 	}
-	jitter := time.Duration(jitterRand.Int63n(int64(h.jitterDelay)))
-	return h.actionDelay + jitter
+
+	return DailyLimitPauseDuration + randomJitterDuration(h.jitterDelay)
+}
+
+func randomJitterDuration(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+
+	jitterRandMu.Lock()
+	defer jitterRandMu.Unlock()
+	return time.Duration(jitterRand.Int63n(int64(max)))
 }
 
 // Filter returns a filter function for incoming messages from dating bot
@@ -166,13 +185,15 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 	}
 
 	if isDailyLimitMessage(text) {
-		pausedUntil := h.state.PauseFor(DailyLimitPauseDuration)
+		pauseDuration := h.getDailyLimitPauseDuration()
+		pausedUntil := h.state.PauseFor(pauseDuration)
+		h.schedulePauseWakeup(pausedUntil)
 		h.state.ResetStuckRecoveryEscalation()
 		h.state.ClearPendingMessage()
 		h.state.ClearProfileData()
 		h.state.ResetRetry()
 		h.state.SetState(StateIdle)
-		log.Printf("[%s] Daily limit message received, pausing until %s", h.Name(), pausedUntil.Format(time.RFC3339))
+		log.Printf("[%s] Daily limit message received, pausing for %v until %s", h.Name(), pauseDuration, pausedUntil.Format(time.RFC3339))
 		return nil
 	}
 
@@ -1395,6 +1416,7 @@ func (h *Handler) WaitWorkerStop() {
 // Shutdown stops accepting new work and then stops worker processing.
 func (h *Handler) Shutdown() {
 	h.state.BeginShutdown()
+	h.clearPauseWakeup()
 	h.cancelLifecycleContext()
 	h.state.CancelWorkerContext()
 	h.StopWorker()
@@ -1487,10 +1509,75 @@ func (h *Handler) isPaused() bool {
 	}
 
 	if resumed {
-		log.Printf("[%s] 24h pause expired, resuming processing", h.Name())
+		h.clearPauseWakeup()
+		log.Printf("[%s] Pause expired, resuming processing", h.Name())
 	}
 
 	return false
+}
+
+func (h *Handler) schedulePauseWakeup(deadline time.Time) {
+	if deadline.IsZero() {
+		h.clearPauseWakeup()
+		return
+	}
+
+	ctx := h.lifecycleContext()
+	delay := time.Until(deadline)
+	if delay < 0 {
+		delay = 0
+	}
+
+	h.pauseWakeMu.Lock()
+	if h.pauseWakeTimer != nil {
+		h.pauseWakeTimer.Stop()
+	}
+	h.pauseWakeDeadline = deadline
+	h.pauseWakeTimer = time.AfterFunc(delay, func() {
+		h.resumeAfterPause(ctx, deadline)
+	})
+	h.pauseWakeMu.Unlock()
+}
+
+func (h *Handler) clearPauseWakeup() {
+	h.pauseWakeMu.Lock()
+	timer := h.pauseWakeTimer
+	h.pauseWakeTimer = nil
+	h.pauseWakeDeadline = time.Time{}
+	h.pauseWakeMu.Unlock()
+
+	if timer != nil {
+		timer.Stop()
+	}
+}
+
+func (h *Handler) resumeAfterPause(ctx context.Context, deadline time.Time) {
+	h.pauseWakeMu.Lock()
+	if !h.pauseWakeDeadline.Equal(deadline) {
+		h.pauseWakeMu.Unlock()
+		return
+	}
+	h.pauseWakeTimer = nil
+	h.pauseWakeMu.Unlock()
+
+	if h.shouldStopProcessing(ctx) {
+		return
+	}
+
+	paused, resumed, until := h.state.CheckPause(time.Now())
+	if paused {
+		h.schedulePauseWakeup(until)
+		return
+	}
+	if !resumed {
+		return
+	}
+
+	h.clearPauseWakeup()
+	log.Printf("[%s] Pause expired, sending /start to re-check profile availability", h.Name())
+	if err := h.sendStartCommand(ctx); err != nil && !h.shouldStopProcessing(ctx) {
+		log.Printf("[%s] Failed to resume after pause: %v", h.Name(), err)
+	}
 }
 
 func (h *Handler) shouldSkipOwnProfileByMessageID(messageID int32) bool {

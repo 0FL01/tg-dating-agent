@@ -1912,6 +1912,35 @@ func TestHandleGenericTooManyLikesPausesBeforeRecovery(t *testing.T) {
 	}
 }
 
+func TestHandleDailyLimitSchedulesResumeCheck(t *testing.T) {
+	h := &Handler{chatID: 123456789, state: NewStateMachine()}
+	h.setBotPeer(&telegram.InputPeerUser{UserID: h.chatID, AccessHash: 1})
+	h.dailyLimitPauseFn = func() time.Duration {
+		return 20 * time.Millisecond
+	}
+
+	resumeCh := make(chan string, 1)
+	h.sendMessageFn = func(_ context.Context, _ telegram.InputPeer, msg string) error {
+		resumeCh <- msg
+		return nil
+	}
+
+	t.Cleanup(h.Shutdown)
+
+	if err := h.Handle(&telegram.NewMessage{Message: &telegram.MessageObj{Message: "Too many likes today, try again tomorrow"}}); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+
+	select {
+	case msg := <-resumeCh:
+		if msg != "/start" {
+			t.Fatalf("resume message = %q, want %q", msg, "/start")
+		}
+	case <-time.After(testSyncTimeout):
+		t.Fatal("resume check was not scheduled after daily limit pause")
+	}
+}
+
 func TestHandlePausedSkipsGenericRecovery(t *testing.T) {
 	h := &Handler{state: NewStateMachine()}
 	h.state.SetState(StateViewingProfiles)
