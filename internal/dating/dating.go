@@ -61,6 +61,9 @@ type Handler struct {
 	pauseWakeTimer               *time.Timer
 	pauseWakeDeadline            time.Time
 	dailyLimitPauseFn            func() time.Duration
+	verificationHistoryOnce      sync.Once
+	verificationHistoryErr       error
+	getVerificationHistoryFn     func(int) ([]telegram.NewMessage, error)
 }
 
 type replyAuditAppender interface {
@@ -163,6 +166,9 @@ func (h *Handler) Filter() func(*telegram.NewMessage) bool {
 
 // Handle processes incoming messages from the dating bot
 func (h *Handler) Handle(m *telegram.NewMessage) error {
+	if h.observeVerification(m) {
+		return nil
+	}
 	h.cacheBotPeer(m)
 	messageButton := h.state.ObserveProfileKeyboard(m)
 
@@ -709,11 +715,17 @@ func (h *Handler) finalizeSendState() {
 }
 
 func (h *Handler) sendDatingMessage(ctx context.Context, peer telegram.InputPeer, msg string) error {
+	if h.state.IsWaitingVerification() {
+		return context.Canceled
+	}
 	if h.sendMessageFn != nil {
 		return h.sendMessageFn(ctx, peer, msg)
 	}
 
 	_, err := tghelper.RetryTelegram(ctx, "send_dating_message", func() (*telegram.NewMessage, error) {
+		if h.state.IsWaitingVerification() {
+			return nil, context.Canceled
+		}
 		return h.tgClient.SendMessage(peer, msg)
 	})
 
@@ -852,6 +864,9 @@ func (h *Handler) clickButton(buttonText string) error {
 }
 
 func (h *Handler) clickButtonWithContext(ctx context.Context, buttonText string) error {
+	if h.state.IsWaitingVerification() {
+		return context.Canceled
+	}
 	log.Printf("[%s] Clicking button: %s", h.Name(), buttonText)
 	if h.clickButtonFn != nil {
 		return h.clickButtonFn(ctx, buttonText)
@@ -866,6 +881,9 @@ func (h *Handler) clickButtonWithContext(ctx context.Context, buttonText string)
 		return err
 	}
 	_, err = tghelper.RetryTelegram(ctx, "click_button", func() (*telegram.NewMessage, error) {
+		if h.state.IsWaitingVerification() {
+			return nil, context.Canceled
+		}
 		return h.tgClient.SendMessage(peer, buttonText)
 	})
 
@@ -913,6 +931,9 @@ func (h *Handler) Stop() {
 	log.Printf("[%s] Stopping...", h.Name())
 	h.Shutdown()
 	h.stopSleepOnce.Do(func() {
+		if h.state.IsWaitingVerification() {
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), stopCommandTimeout)
 		defer cancel()
 
@@ -935,6 +956,12 @@ func (h *Handler) Start() {
 }
 
 func (h *Handler) Bootstrap() error {
+	if h.isPaused() {
+		return nil
+	}
+	if err := h.CheckVerificationHistory(); err != nil {
+		return err
+	}
 	return h.bootstrapWithActions(func() error {
 		return h.sendBootstrapCommand("/start")
 	}, nil)
@@ -961,7 +988,7 @@ func (h *Handler) bootstrapWithActions(sendStart func() error, startSearch func(
 	}
 
 	var searchErr error
-	if startSearch != nil {
+	if startSearch != nil && !h.state.IsWaitingVerification() {
 		searchErr = startSearch()
 		if searchErr != nil {
 			log.Printf("[%s] Startup bootstrap: %s failed: %v", h.Name(), ButtonViewProfiles, searchErr)
@@ -1001,6 +1028,9 @@ func (h *Handler) sendBootstrapCommand(command string) error {
 	}
 
 	_, err = tghelper.RetryTelegram(ctx, "bootstrap_send_start", func() (*telegram.NewMessage, error) {
+		if h.shouldStopProcessing(ctx) {
+			return nil, context.Canceled
+		}
 		return h.tgClient.SendMessage(peer, command)
 	})
 	if err != nil {
@@ -1033,6 +1063,16 @@ func (h *Handler) sendStartCommand(ctx context.Context) error {
 }
 
 func (h *Handler) HandleAlbum(a *telegram.Album) error {
+	if a != nil {
+		for _, m := range a.Messages {
+			if h.observeVerification(m) {
+				return nil
+			}
+		}
+	}
+	if h.state.IsWaitingVerification() {
+		return nil
+	}
 	h.cacheBotPeerFromAlbum(a)
 	var messageButton string
 	if a != nil {
@@ -1108,6 +1148,9 @@ func (h *Handler) handleAlbumJob(ctx context.Context, a *telegram.Album, message
 
 // processJob processes jobs from the queue sequentially
 func (h *Handler) processJob(ctx context.Context, job ProfileJob) error {
+	if h.shouldStopProcessing(ctx) {
+		return nil
+	}
 	switch job.Type {
 	case "message":
 		if job.Message == nil {
@@ -1410,7 +1453,7 @@ func (h *Handler) cancelLifecycleContext() {
 }
 
 func (h *Handler) shouldStopProcessing(ctx context.Context) bool {
-	if h.state.IsStopped() {
+	if h.state.IsStopped() || h.state.IsWaitingVerification() {
 		return true
 	}
 
@@ -1467,6 +1510,9 @@ func (h *Handler) cacheBotPeerFromAlbum(a *telegram.Album) {
 }
 
 func (h *Handler) isPaused() bool {
+	if h.state.IsWaitingVerification() {
+		return true
+	}
 	paused, resumed, until := h.state.CheckPause(time.Now())
 	if paused {
 		log.Printf("[%s] Dating is paused until %s, skipping message", h.Name(), until.Format(time.RFC3339))

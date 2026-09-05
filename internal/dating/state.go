@@ -17,6 +17,7 @@ const (
 	StateViewingProfiles
 	StateWaitingPrompt
 	StateStopped
+	StateWaitingVerification
 )
 
 func (s State) String() string {
@@ -29,6 +30,8 @@ func (s State) String() string {
 		return "waiting_prompt"
 	case StateStopped:
 		return "stopped"
+	case StateWaitingVerification:
+		return "waiting_verification"
 	default:
 		return "unknown"
 	}
@@ -57,6 +60,7 @@ type ProfileJob struct {
 type StateMachine struct {
 	mu                   sync.RWMutex
 	state                State
+	verificationWaiting  bool
 	stuckEscalationLevel int
 	pendingMessage       string
 	retryCount           int
@@ -161,6 +165,9 @@ func (sm *StateMachine) AddRecentReciprocalLikeContext(entry RecentReciprocalLik
 
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	if sm.verificationWaiting {
+		return
+	}
 
 	sm.pruneReciprocalLikeContextLocked(entry.CapturedAt)
 	sm.reciprocalLikeContext = append(sm.reciprocalLikeContext, entry)
@@ -275,6 +282,9 @@ func (sm *StateMachine) GetState() State {
 func (sm *StateMachine) SetState(state State) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	if sm.verificationWaiting && state != StateStopped {
+		return
+	}
 	sm.state = state
 
 	// Reset skip flag when stopping or going idle
@@ -293,7 +303,7 @@ func (sm *StateMachine) SetStateIfNotStopped(state State) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	if sm.state == StateStopped {
+	if sm.state == StateStopped || sm.verificationWaiting {
 		return false
 	}
 
@@ -320,7 +330,7 @@ func (sm *StateMachine) GetPendingMessage() string {
 func (sm *StateMachine) SetPendingMessage(msg string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if sm.state == StateStopped {
+	if sm.state == StateStopped || sm.verificationWaiting {
 		return
 	}
 	sm.pendingMessage = msg
@@ -447,6 +457,9 @@ func (sm *StateMachine) rememberVisibleProfileCard(profileText string, messageID
 
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	if sm.verificationWaiting {
+		return
+	}
 	sm.pruneVisibleProfileCardLocked(now)
 	sm.visibleProfileCard = RecentVisibleProfileCard{
 		ProfileText: trimmedProfileText,
@@ -630,7 +643,7 @@ func (sm *StateMachine) ResetRetry() {
 func (sm *StateMachine) SetProfileData(data *ProfileData) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if sm.state == StateStopped {
+	if sm.state == StateStopped || sm.verificationWaiting {
 		return
 	}
 	if data == nil {
@@ -662,7 +675,7 @@ func (sm *StateMachine) FinalizeSendState(expectedCurrent State) bool {
 	defer sm.mu.Unlock()
 
 	sm.captureRecentReciprocalLikeContextLocked(time.Now())
-	if sm.state == StateIdle || sm.state == StateStopped {
+	if sm.state == StateIdle || sm.state == StateStopped || sm.verificationWaiting {
 		sm.pendingMessage = ""
 		sm.profileData = nil
 		sm.retryCount = 0
@@ -848,6 +861,9 @@ func (sm *StateMachine) RememberGroupedCaption(groupedID int64, text string, mes
 
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	if sm.verificationWaiting {
+		return
+	}
 	sm.pruneGroupedCaptionsLocked(now)
 
 	sm.groupedCaptions[groupedID] = groupedCaptionContext{
@@ -862,7 +878,7 @@ func (sm *StateMachine) RememberGroupedCaption(groupedID int64, text string, mes
 func (sm *StateMachine) ObserveProfileKeyboard(m *telegram.NewMessage) string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if sm.state == StateStopped || m == nil || m.Message == nil {
+	if sm.state == StateStopped || sm.verificationWaiting || m == nil || m.Message == nil {
 		return ""
 	}
 	if m.ID < sm.activeKeyboardID {

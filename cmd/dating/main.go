@@ -110,6 +110,9 @@ func main() {
 	}
 
 	handler := dating.NewStandaloneHandler(cfg, result.Client, llmClient)
+	if err := handler.CheckVerificationHistory(); err != nil {
+		log.Printf("Dating startup blocked: %v", err)
+	}
 	handler.Start()
 	handler.StartWorker()
 
