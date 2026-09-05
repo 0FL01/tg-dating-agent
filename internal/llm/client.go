@@ -41,8 +41,8 @@ func NewClient(apiKey, baseURL string) *Client {
 		config.BaseURL = strings.TrimRight(baseURL, "/")
 	}
 	endpoint, _ := url.Parse(config.BaseURL)
-	if endpoint != nil && endpoint.Hostname() == "opencode.ai" && endpoint.Path == "/zen/go/v1" {
-		config.HTTPClient = &goHTTPClient{client: &http.Client{}, session: rand.Text()}
+	if endpoint != nil && endpoint.Hostname() == "opencode.ai" && (endpoint.Path == "/zen/go/v1" || endpoint.Path == "/zen/v1") {
+		config.HTTPClient = &openCodeHTTPClient{client: &http.Client{}, session: rand.Text()}
 	}
 	openRouterClient := openrouter.NewClientWithConfig(*config)
 	return &Client{
@@ -51,13 +51,13 @@ func NewClient(apiKey, baseURL string) *Client {
 	}
 }
 
-// OpenCode Go requires honest application identification and a caching session.
-type goHTTPClient struct {
+// OpenCode requests carry honest application identification and a stable caching session.
+type openCodeHTTPClient struct {
 	client  *http.Client
 	session string
 }
 
-func (c *goHTTPClient) Do(req *http.Request) (*http.Response, error) {
+func (c *openCodeHTTPClient) Do(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
 	req.Header.Set("User-Agent", "tg-dating-agent")
 	req.Header.Set("x-opencode-session", c.session)

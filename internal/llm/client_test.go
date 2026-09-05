@@ -53,24 +53,26 @@ func TestClientCustomEndpoint(t *testing.T) {
 	}
 }
 
-func TestGoHTTPClientHeaders(t *testing.T) {
+func TestOpenCodeHTTPClientHeaders(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("User-Agent") != "tg-dating-agent" || r.Header.Get("x-opencode-session") != "opaque-session" {
-			t.Error("missing Go identification")
+			t.Error("missing OpenCode identification or unstable session")
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	client := &goHTTPClient{client: server.Client(), session: "opaque-session"}
+	client := &openCodeHTTPClient{client: server.Client(), session: "opaque-session"}
 	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	for range 2 {
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
 	}
-	resp.Body.Close()
 	if req.Header.Get("x-opencode-session") != "" {
 		t.Fatal("mutated caller headers")
 	}
