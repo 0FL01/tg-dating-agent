@@ -35,6 +35,8 @@ func (s State) String() string {
 }
 
 type ProfileData struct {
+	MessageButton    string
+	ProfileMessageID int32
 	PhotoPaths       []string
 	PhotoIdentifiers []string
 	ProfileText      string
@@ -70,6 +72,7 @@ type StateMachine struct {
 	workerCancel          context.CancelFunc
 	recoveryQueued        map[string]bool
 	groupedCaptions       map[int64]groupedCaptionContext
+	groupedButtons        map[int64]groupedCaptionContext
 	startupOwnProfileSkip startupOwnProfileSkipContext
 	latestProfileJobID    int32
 	lastProcessedJobID    int32
@@ -141,6 +144,7 @@ func NewStateMachine() *StateMachine {
 			"stuck_recovery": false,
 		},
 		groupedCaptions:    make(map[int64]groupedCaptionContext),
+		groupedButtons:     make(map[int64]groupedCaptionContext),
 		profileLLMCache:    make(map[string]llm.Decision),
 		profileLLMCacheMax: defaultProfileLLMCacheMaxEntries,
 		reciprocalLikeMax:  defaultReciprocalLikeContextMaxEntries,
@@ -370,7 +374,7 @@ func (sm *StateMachine) Enqueue(job ProfileJob) bool {
 }
 
 func isRecoveryJobType(jobType string) bool {
-	return jobType == "menu_recovery" || jobType == "stuck_recovery"
+	return jobType == "menu_recovery" || jobType == "stuck_recovery" || jobType == "premium_recovery"
 }
 
 func isProfileJobType(jobType string) bool {
@@ -405,6 +409,7 @@ func (sm *StateMachine) BeginShutdown() {
 	sm.retryCount = 0
 	sm.ownProfileSkip = ownProfileSkipContext{}
 	sm.groupedCaptions = make(map[int64]groupedCaptionContext)
+	sm.groupedButtons = make(map[int64]groupedCaptionContext)
 	sm.startupOwnProfileSkip = startupOwnProfileSkipContext{}
 	sm.latestProfileJobID = 0
 	sm.lastProcessedJobID = 0
@@ -845,6 +850,33 @@ func (sm *StateMachine) RememberGroupedCaption(groupedID int64, text string, mes
 		messageID: messageID,
 		setAt:     now,
 	}
+}
+
+func (sm *StateMachine) RememberGroupedButton(groupedID int64, text string, messageID int32, now time.Time) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.state == StateStopped || groupedID == 0 {
+		return
+	}
+	for id, entry := range sm.groupedButtons {
+		if now.Sub(entry.setAt) > groupedCaptionTTL {
+			delete(sm.groupedButtons, id)
+		}
+	}
+	if previous, ok := sm.groupedButtons[groupedID]; !ok || messageID >= previous.messageID {
+		sm.groupedButtons[groupedID] = groupedCaptionContext{text: text, messageID: messageID, setAt: now}
+	}
+}
+
+func (sm *StateMachine) ConsumeGroupedButton(groupedID int64, maxMessageID int32, now time.Time) string {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	entry, ok := sm.groupedButtons[groupedID]
+	delete(sm.groupedButtons, groupedID)
+	if !ok || now.Sub(entry.setAt) > groupedCaptionTTL || entry.messageID > maxMessageID {
+		return ""
+	}
+	return entry.text
 }
 
 func (sm *StateMachine) ConsumeGroupedCaption(groupedID int64, now time.Time) (string, bool) {

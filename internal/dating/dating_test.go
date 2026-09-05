@@ -1275,6 +1275,7 @@ func TestGenerateAndSendLikeUsesProfileLLMCacheForSinglePhoto(t *testing.T) {
 	}
 
 	first := ProfileData{
+		MessageButton:    ButtonLikeMessage,
 		ProfileText:      "  Alice   \n  bio  ",
 		PhotoIdentifiers: []string{"100:200"},
 	}
@@ -1283,6 +1284,7 @@ func TestGenerateAndSendLikeUsesProfileLLMCacheForSinglePhoto(t *testing.T) {
 	}
 
 	second := ProfileData{
+		MessageButton:    ButtonLikeMessage,
 		ProfileText:      "alice bio",
 		PhotoIdentifiers: []string{"100:200"},
 	}
@@ -1350,10 +1352,10 @@ func TestGenerateAndSendLikeUsesProfileLLMCacheForAlbumWithStablePhotoOrdering(t
 		t.Fatalf("buildProfileLLMCacheKey() mismatch for equivalent albums: %q != %q", firstKey, secondKey)
 	}
 
-	if err := h.generateAndSendLike(ctx, ProfileData{ProfileText: "Album profile", PhotoIdentifiers: firstIDs}); err != nil {
+	if err := h.generateAndSendLike(ctx, ProfileData{ProfileText: "Album profile", PhotoIdentifiers: firstIDs, MessageButton: ButtonLikeMessage}); err != nil {
 		t.Fatalf("generateAndSendLike(first album) error = %v, want nil", err)
 	}
-	if err := h.generateAndSendLike(ctx, ProfileData{ProfileText: "  album   profile ", PhotoIdentifiers: secondIDs}); err != nil {
+	if err := h.generateAndSendLike(ctx, ProfileData{ProfileText: "  album   profile ", PhotoIdentifiers: secondIDs, MessageButton: ButtonLikeMessage}); err != nil {
 		t.Fatalf("generateAndSendLike(second album) error = %v, want nil", err)
 	}
 
@@ -1421,7 +1423,7 @@ func TestGenerateAndSendLikeMarkProcessedBestEffortOnLikePath(t *testing.T) {
 		},
 	}
 
-	if err := h.generateAndSendLike(ctx, ProfileData{ProfileText: "fresh profile"}); err != nil {
+	if err := h.generateAndSendLike(ctx, ProfileData{ProfileText: "fresh profile", MessageButton: ButtonLikeMessage}); err != nil {
 		t.Fatalf("generateAndSendLike() error = %v, want nil", err)
 	}
 
@@ -1911,7 +1913,7 @@ func TestFinalizeSendStateRetainsContextForBotRejection(t *testing.T) {
 }
 
 func TestHandleMessageEntryPromptSendsPendingTextOnce(t *testing.T) {
-	for _, prompt := range []string{"Write a message", "Send this message to the user?"} {
+	for _, prompt := range []string{"Write a message"} {
 		t.Run(prompt, func(t *testing.T) {
 			h := &Handler{chatID: 123456789, state: NewStateMachine()}
 			h.state.SetState(StateWaitingPrompt)

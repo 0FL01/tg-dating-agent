@@ -83,5 +83,25 @@ func hasProfileActionKeyboard(m *telegram.NewMessage) bool {
 		return true
 	}
 
-	return hasReplyKeyboardButtonText(m, ButtonLikeMessage)
+	_, ok := profileMessageButtonText(m)
+	return ok
+}
+
+func profileMessageButtonText(m *telegram.NewMessage) (string, bool) {
+	if !hasReplyKeyboardButtonText(m, ButtonDislike) {
+		return "", false
+	}
+	return findReplyKeyboardButtonText(m, func(text string) bool {
+		if !strings.Contains(text, "💌") {
+			return false
+		}
+		for _, r := range text {
+			switch r {
+			case '💌', '📹', '📷', '🎥', '🎤', ' ', '/', '\ufe0f':
+			default:
+				return false
+			}
+		}
+		return true
+	})
 }

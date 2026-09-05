@@ -35,7 +35,7 @@ func TestStructuredDecisionFlow(t *testing.T) {
 			var buttons []string
 			h := &Handler{state: NewStateMachine(), client: client, prompt: "my selection criteria", model: "vision", clickButtonFn: func(_ context.Context, button string) error { buttons = append(buttons, button); return nil }}
 			h.replyAudit = audit
-			if err := h.generateAndSendLike(context.Background(), ProfileData{ProfileText: ""}); err != nil {
+			if err := h.generateAndSendLike(context.Background(), ProfileData{ProfileText: "", MessageButton: ButtonLikeMessage}); err != nil {
 				t.Fatal(err)
 			}
 			if len(buttons) != 1 || buttons[0] != tc.button || client.snapshotCallCount() != tc.calls {
@@ -108,7 +108,7 @@ func TestTelegramRejectionRetainsPhotosAndStopsWithoutFallback(t *testing.T) {
 			if err := os.WriteFile(photo, []byte("photo bytes"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if err := h.generateAndSendLike(context.Background(), ProfileData{ProfileText: "bio", PhotoPaths: []string{photo}}); err != nil {
+			if err := h.generateAndSendLike(context.Background(), ProfileData{ProfileText: "bio", PhotoPaths: []string{photo}, MessageButton: ButtonLikeMessage}); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.Remove(photo); err != nil {

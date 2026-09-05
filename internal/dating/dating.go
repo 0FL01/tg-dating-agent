@@ -179,7 +179,18 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 	}
 
 	h.rememberGroupedCaption(m, text)
+	if m.Message != nil && m.Message.GroupedID != 0 && hasReplyMarkup(m) {
+		button, _ := profileMessageButtonText(m)
+		h.state.RememberGroupedButton(m.Message.GroupedID, button, m.ID, time.Now())
+	}
 	log.Printf("[%s] Received message: %s...", h.Name(), utils.Truncate(text, 50))
+
+	if isPremiumPurchaseMessage(text) {
+		if !h.state.Enqueue(ProfileJob{Type: "premium_recovery", Message: m}) {
+			log.Printf("[%s] Premium recovery already queued or queue unavailable", h.Name())
+		}
+		return nil
+	}
 
 	if isReciprocalLikePrompt(text) {
 		return h.handleReciprocalLikePrompt(m)
@@ -208,7 +219,13 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 		return h.retryGenerateMessage(h.lifecycleContext(), text)
 	}
 
-	if strings.Contains(text, PatternWriteMessage) || text == PatternSendMessage {
+	if strings.TrimSpace(text) == PatternSendMessage {
+		h.decisionMu.Lock()
+		defer h.decisionMu.Unlock()
+		log.Printf("[%s] Unexpected message confirmation; stopping locally without confirming or sending text", h.Name())
+		return h.stopMessageEntry(h.lifecycleContext())
+	}
+	if strings.Contains(text, PatternWriteMessage) {
 		return h.sendPendingMessage(m)
 	}
 
@@ -232,11 +249,10 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 		return nil
 	}
 
+	if m.Message != nil && m.Message.GroupedID != 0 {
+		return nil
+	}
 	if m.Photo() != nil || m.IsMedia() {
-		if m.Message != nil && m.Message.GroupedID != 0 {
-			return nil
-		}
-
 		if h.state.ConsumeStartupOwnProfileSkip(time.Now()) {
 			log.Printf("[%s] Skipping startup own profile photo (markerless fallback)", h.Name())
 			return nil
@@ -456,6 +472,8 @@ func (h *Handler) downloadProfileData(ctx context.Context, m *telegram.NewMessag
 	data.PhotoPaths = photoPaths
 	data.PhotoIdentifiers = photoIdentifiersFromMessage(m)
 	data.ProfileText = m.Text()
+	data.MessageButton, _ = profileMessageButtonText(m)
+	data.ProfileMessageID = m.ID
 
 	log.Printf("[%s] Profile text: %s", h.Name(), utils.Truncate(data.ProfileText, 100))
 
@@ -513,6 +531,10 @@ func (h *Handler) generateAndSendLike(ctx context.Context, data ProfileData) err
 		return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, cacheKey)
 	}
 	data.Decision = decision
+	if data.MessageButton == "" {
+		log.Printf("[%s] No usable profile message button; stopping before message entry", h.Name())
+		return h.stopMessageEntry(ctx)
+	}
 	h.state.SetProfileData(&data)
 	h.state.ResetRetry()
 	h.state.SetPendingMessage(decision.Message)
@@ -520,7 +542,7 @@ func (h *Handler) generateAndSendLike(ctx context.Context, data ProfileData) err
 		return nil
 	}
 
-	return h.clickButtonAndMarkProcessed(ctx, ButtonLikeMessage, cacheKey)
+	return h.clickButtonAndMarkProcessed(ctx, data.MessageButton, cacheKey)
 }
 
 func (h *Handler) generateDecision(ctx context.Context, data ProfileData, feedback string) (llm.Decision, error) {
@@ -561,6 +583,14 @@ func (h *Handler) sendPendingMessage(m *telegram.NewMessage) error {
 	defer h.decisionMu.Unlock()
 	if h.state.GetState() != StateWaitingPrompt {
 		return nil
+	}
+	if data := h.state.GetProfileData(); data != nil && data.ProfileMessageID > 0 {
+		if m == nil || m.ID <= data.ProfileMessageID {
+			return nil
+		}
+		if pending, _, _ := h.state.HasPendingFresherProfileJob(); pending {
+			return h.stopMessageEntry(h.lifecycleContext())
+		}
 	}
 	msg := h.state.GetPendingMessage()
 	if err := (llm.Decision{Action: "send", Message: msg}).Validate(); err != nil {
@@ -1086,6 +1116,8 @@ func (h *Handler) processJob(ctx context.Context, job ProfileJob) error {
 		}
 		h.state.ResetStuckRecoveryEscalation()
 		return h.handleAlbumJob(ctx, job.Album)
+	case "premium_recovery":
+		return h.recoverPremiumPurchase(ctx, job.Message)
 	case "menu_recovery":
 		log.Printf("[%s] Processing menu recovery job", h.Name())
 		return h.clickButtonWithContext(ctx, ButtonViewProfiles)
@@ -1694,6 +1726,15 @@ func (h *Handler) downloadAlbumData(ctx context.Context, a *telegram.Album, prof
 	data.PhotoPaths = photoPaths
 	data.PhotoIdentifiers = photoIdentifiersFromAlbum(a)
 	data.ProfileText = profileText
+	data.ProfileMessageID = maxAlbumMessageID(a)
+	data.MessageButton = h.state.ConsumeGroupedButton(firstAlbumGroupedID(a), data.ProfileMessageID, time.Now())
+	var markupMessageID int32
+	for _, msg := range a.Messages {
+		if hasReplyMarkup(msg) && msg.ID >= markupMessageID {
+			data.MessageButton, _ = profileMessageButtonText(msg)
+			markupMessageID = msg.ID
+		}
+	}
 
 	cleanup := func() {
 		for _, path := range photoPaths {
