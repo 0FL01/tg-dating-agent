@@ -228,7 +228,7 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 		log.Printf("[%s] Unexpected message confirmation; stopping locally without confirming or sending text", h.Name())
 		return h.stopMessageEntry(h.lifecycleContext())
 	}
-	if strings.Contains(text, PatternWriteMessage) {
+	if strings.Contains(text, PatternWriteMessage) || strings.Contains(text, PatternSendTextMedia) {
 		return h.sendPendingMessage(m)
 	}
 

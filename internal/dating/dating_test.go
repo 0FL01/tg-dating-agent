@@ -1913,7 +1913,7 @@ func TestFinalizeSendStateRetainsContextForBotRejection(t *testing.T) {
 }
 
 func TestHandleMessageEntryPromptSendsPendingTextOnce(t *testing.T) {
-	for _, prompt := range []string{"Write a message"} {
+	for _, prompt := range []string{PatternWriteMessage, PatternSendTextMedia} {
 		t.Run(prompt, func(t *testing.T) {
 			h := &Handler{chatID: 123456789, state: NewStateMachine()}
 			h.state.SetState(StateWaitingPrompt)
