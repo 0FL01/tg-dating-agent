@@ -3,6 +3,7 @@ package dating
 import (
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,11 +12,29 @@ import (
 
 const verificationHistoryLimit = 50
 
+// Authoritative incoming confirmations observed from the dating bot.
+// Resume happens ONLY on these exact texts (trimmed, case-sensitive).
+// The processing notice alone can never resume.
+const (
+	verificationProcessingText = "The video is being processed, please wait..."
+	verificationPassedText     = "Verification passed, thank you!"
+	verificationPassedEmoji    = "✅"
+)
+
 func isVerificationRequest(text string) bool {
 	text = strings.ToLower(strings.TrimSpace(text))
 	return strings.HasPrefix(text, "to verify your profile, send a circle video") &&
 		strings.Contains(text, "say leomatchbot on camera") &&
 		strings.Contains(text, "show this gesture")
+}
+
+func isVerificationProcessing(text string) bool {
+	return strings.TrimSpace(text) == verificationProcessingText
+}
+
+func isVerificationSuccess(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	return trimmed == verificationPassedText || trimmed == verificationPassedEmoji
 }
 
 func (sm *StateMachine) IsWaitingVerification() bool {
@@ -58,27 +77,44 @@ func (sm *StateMachine) waitForVerification() {
 }
 
 // Cancellation must precede any wait on decisionMu: the LLM owns that lock.
-// There is deliberately no automatic resume without known success evidence.
 func (h *Handler) waitForVerification() {
 	h.state.waitForVerification()
 	h.clearPauseWakeup()
 	_ = h.lifecycleContext()
 	h.cancelLifecycleContext()
 	h.state.CancelWorkerContext()
-	log.Printf("[%s] Waiting for human verification; automation disabled, no automatic resume", h.Name())
+	log.Printf("[%s] Waiting for human verification; automation disabled", h.Name())
 }
 
 func (h *Handler) observeVerification(m *telegram.NewMessage) bool {
-	if m != nil && m.Message != nil && !m.Message.Out && m.ChatID() == h.chatID && isVerificationRequest(m.Text()) {
-		h.waitForVerification()
-		return true
+	if m != nil && m.Message != nil && !m.Message.Out && m.ChatID() == h.chatID {
+		text := m.Text()
+		if isVerificationRequest(text) {
+			h.waitForVerification()
+			return true
+		}
+		// Explicit safe resume: ONLY exact authoritative incoming success
+		// resumes, and only when a request was seen before (currently waiting).
+		// Processing notice, outgoing "1"/"➡️", keyboards and Skip never resume.
+		if isVerificationProcessing(text) {
+			return h.state.IsWaitingVerification()
+		}
+		if isVerificationSuccess(text) {
+			if h.state.IsWaitingVerification() {
+				h.resumeFromVerification()
+			}
+			return h.state.IsWaitingVerification()
+		}
 	}
 	return h.state.IsWaitingVerification()
 }
 
 // CheckVerificationHistory is read-only and must run before handlers/workers
-// are registered. Any challenge in this bounded window is treated as unresolved;
-// outgoing videos, Skip, menus and later media are not proof of verification.
+// are registered. It replays the bounded 50-history window oldest-first so an
+// OLD request coexisting with a later authoritative success resumes instead of
+// staying blocked. Success only after request resumes; inverted order
+// (success before request), processing-only, outgoing, keyboard and Skip input
+// never resume.
 func (h *Handler) CheckVerificationHistory() error {
 	h.verificationHistoryOnce.Do(func() {
 		getHistory := h.getVerificationHistoryFn
@@ -100,10 +136,41 @@ func (h *Handler) CheckVerificationHistory() error {
 			h.verificationHistoryErr = fmt.Errorf("verification history check failed (automation disabled): %w", err)
 			return
 		}
-		for i := range messages {
-			if h.observeVerification(&messages[i]) {
-				break
+		ordered := make([]telegram.NewMessage, len(messages))
+		copy(ordered, messages)
+		sort.SliceStable(ordered, func(i, j int) bool {
+			di, dj := ordered[i].Date(), ordered[j].Date()
+			if di != dj {
+				return di < dj
 			}
+			return ordered[i].ID < ordered[j].ID
+		})
+		pendingRequest := false
+		for i := range ordered {
+			m := &ordered[i]
+			if m.Message == nil || m.Message.Out {
+				continue
+			}
+			if m.ChatID() != h.chatID {
+				continue
+			}
+			text := m.Text()
+			if isVerificationRequest(text) {
+				pendingRequest = true
+				continue
+			}
+			if isVerificationProcessing(text) {
+				continue
+			}
+			if isVerificationSuccess(text) {
+				if pendingRequest {
+					pendingRequest = false
+				}
+				continue
+			}
+		}
+		if pendingRequest {
+			h.waitForVerification()
 		}
 	})
 	return h.verificationHistoryErr

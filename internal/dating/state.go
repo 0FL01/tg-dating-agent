@@ -273,6 +273,26 @@ func (sm *StateMachine) SetProfileLLMCache(key string, decision llm.Decision) {
 	delete(sm.profileLLMCache, oldestKey)
 }
 
+// resumeFromVerification clears the verification wait and re-enables work.
+// It returns false when there was no wait to clear (duplicate success safe).
+// Stopped handlers stay stopped; only the wait flag is cleared.
+func (sm *StateMachine) resumeFromVerification() bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if !sm.verificationWaiting {
+		return false
+	}
+	sm.verificationWaiting = false
+	if sm.state == StateStopped {
+		return true
+	}
+	sm.acceptingWork = true
+	if sm.state == StateWaitingVerification {
+		sm.state = StateIdle
+	}
+	return true
+}
+
 func (sm *StateMachine) GetState() State {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()

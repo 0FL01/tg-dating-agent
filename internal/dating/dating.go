@@ -1452,6 +1452,42 @@ func (h *Handler) cancelLifecycleContext() {
 	}
 }
 
+func (h *Handler) resetLifecycleContext() {
+	h.lifecycleMu.Lock()
+	defer h.lifecycleMu.Unlock()
+
+	if h.lifecycleCancel != nil {
+		h.lifecycleCancel()
+		h.lifecycleCancel = nil
+	}
+	if h.lifecycleCtx == nil || h.lifecycleCtx.Err() != nil {
+		h.lifecycleCtx, h.lifecycleCancel = context.WithCancel(context.Background())
+	} else if h.lifecycleCancel == nil {
+		h.lifecycleCtx, h.lifecycleCancel = context.WithCancel(context.Background())
+	}
+}
+
+// resumeFromVerification clears the wait, renews lifecycle and restarts the
+// worker so automation can begin processing again. Duplicate success is safe
+// (second call is a no-op). When the worker quit channel is closed
+// (Shutdown/Stop), automatic restart is impossible and manual restart is
+// required; the wait flag is still cleared.
+func (h *Handler) resumeFromVerification() bool {
+	if !h.state.resumeFromVerification() {
+		return false
+	}
+	h.resetLifecycleContext()
+	h.state.WaitWorkerStop()
+	h.StartWorker()
+	select {
+	case <-h.state.ShouldQuit():
+		log.Printf("[%s] Verification passed; manual restart required (worker quit closed)", h.Name())
+	default:
+		log.Printf("[%s] Verification passed; automation resumed", h.Name())
+	}
+	return true
+}
+
 func (h *Handler) shouldStopProcessing(ctx context.Context) bool {
 	if h.state.IsStopped() || h.state.IsWaitingVerification() {
 		return true
