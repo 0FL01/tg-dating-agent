@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/0FL01/tg-dating-agent/internal/llm"
+
 	"github.com/amarnathcjd/gogram/telegram"
 )
 
@@ -306,29 +308,35 @@ func TestStateMachineHasPendingFresherProfileJob(t *testing.T) {
 func TestStateMachineProfileLLMCacheSetGet(t *testing.T) {
 	sm := NewStateMachine()
 
-	sm.SetProfileLLMCache("profile-1", "INTJ", "Hi")
+	sm.SetProfileLLMCache("profile-1", llm.Decision{Action: "send", Message: "Hi"})
 
-	mbti, opener, ok := sm.GetProfileLLMCache("profile-1")
+	decision, ok := sm.GetProfileLLMCache("profile-1")
 	if !ok {
 		t.Fatal("GetProfileLLMCache(profile-1) ok=false, want true")
 	}
-	if mbti != "INTJ" || opener != "Hi" {
-		t.Fatalf("GetProfileLLMCache(profile-1) = (%q, %q), want (%q, %q)", mbti, opener, "INTJ", "Hi")
+	if decision.Action != "send" || decision.Message != "Hi" {
+		t.Fatalf("GetProfileLLMCache(profile-1) = (%q, %q), want (%q, %q)", decision.Action, decision.Message, "send", "Hi")
 	}
 }
 
 func TestStateMachineProfileLLMCacheOverwriteKey(t *testing.T) {
 	sm := NewStateMachine()
 
-	sm.SetProfileLLMCache("profile-1", "INTJ", "Hi")
-	sm.SetProfileLLMCache("profile-1", "INFJ", "Hello")
+	sm.SetProfileLLMCache("profile-1", llm.Decision{Action: "send", Message: "Hi"})
+	sm.SetProfileLLMCache("profile-1", llm.Decision{Action: "send", Message: "Hello"})
 
-	mbti, opener, ok := sm.GetProfileLLMCache("profile-1")
+	decision, ok := sm.GetProfileLLMCache("profile-1")
 	if !ok {
 		t.Fatal("GetProfileLLMCache(profile-1) ok=false, want true")
 	}
-	if mbti != "INFJ" || opener != "Hello" {
-		t.Fatalf("GetProfileLLMCache(profile-1) = (%q, %q), want (%q, %q)", mbti, opener, "INFJ", "Hello")
+	if decision.Action != "send" || decision.Message != "Hello" {
+		t.Fatalf("GetProfileLLMCache(profile-1) = (%q, %q), want (%q, %q)", decision.Action, decision.Message, "send", "Hello")
+	}
+	skip := llm.Decision{Action: "skip", Reason: "no hook"}
+	sm.SetProfileLLMCache("profile-1", skip)
+	sm.SetProfileLLMCache("profile-1", llm.Decision{Action: "send"})
+	if got, ok := sm.GetProfileLLMCache("profile-1"); !ok || got != skip {
+		t.Fatalf("skip not cached or invalid decision cached: %+v", got)
 	}
 }
 
@@ -336,20 +344,20 @@ func TestStateMachineProfileLLMCacheEvictsOldestAtLimit(t *testing.T) {
 	sm := NewStateMachine()
 	sm.profileLLMCacheMax = 2
 
-	sm.SetProfileLLMCache("profile-1", "INTJ", "one")
-	sm.SetProfileLLMCache("profile-2", "INFJ", "two")
-	sm.SetProfileLLMCache("profile-3", "ENTJ", "three")
+	sm.SetProfileLLMCache("profile-1", llm.Decision{Action: "send", Message: "one"})
+	sm.SetProfileLLMCache("profile-2", llm.Decision{Action: "send", Message: "two"})
+	sm.SetProfileLLMCache("profile-3", llm.Decision{Action: "send", Message: "three"})
 
-	if _, _, ok := sm.GetProfileLLMCache("profile-1"); ok {
+	if _, ok := sm.GetProfileLLMCache("profile-1"); ok {
 		t.Fatal("GetProfileLLMCache(profile-1) ok=true after overflow, want false")
 	}
 
-	if mbti, opener, ok := sm.GetProfileLLMCache("profile-2"); !ok || mbti != "INFJ" || opener != "two" {
-		t.Fatalf("GetProfileLLMCache(profile-2) = (%q, %q, %v), want (%q, %q, true)", mbti, opener, ok, "INFJ", "two")
+	if decision, ok := sm.GetProfileLLMCache("profile-2"); !ok || decision.Action != "send" || decision.Message != "two" {
+		t.Fatalf("GetProfileLLMCache(profile-2) = (%q, %q, %v), want (%q, %q, true)", decision.Action, decision.Message, ok, "send", "two")
 	}
 
-	if mbti, opener, ok := sm.GetProfileLLMCache("profile-3"); !ok || mbti != "ENTJ" || opener != "three" {
-		t.Fatalf("GetProfileLLMCache(profile-3) = (%q, %q, %v), want (%q, %q, true)", mbti, opener, ok, "ENTJ", "three")
+	if decision, ok := sm.GetProfileLLMCache("profile-3"); !ok || decision.Action != "send" || decision.Message != "three" {
+		t.Fatalf("GetProfileLLMCache(profile-3) = (%q, %q, %v), want (%q, %q, true)", decision.Action, decision.Message, ok, "send", "three")
 	}
 }
 
@@ -369,7 +377,7 @@ func TestStateMachineProfileLLMCacheConcurrentReadWrite(t *testing.T) {
 				if j%3 == 0 {
 					key = "profile-" + string(rune('a'+(workerID%4)))
 				}
-				sm.SetProfileLLMCache(key, "INTJ", "hello")
+				sm.SetProfileLLMCache(key, llm.Decision{Action: "send", Message: "hello"})
 				sm.GetProfileLLMCache(key)
 			}
 		}(i)
@@ -377,7 +385,7 @@ func TestStateMachineProfileLLMCacheConcurrentReadWrite(t *testing.T) {
 
 	wg.Wait()
 
-	if _, _, ok := sm.GetProfileLLMCache("shared-profile"); !ok {
+	if _, ok := sm.GetProfileLLMCache("shared-profile"); !ok {
 		t.Fatal("GetProfileLLMCache(shared-profile) ok=false, want true")
 	}
 }

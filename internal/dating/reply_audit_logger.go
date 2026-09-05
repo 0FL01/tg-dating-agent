@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0FL01/tg-dating-agent/internal/llm"
 	"github.com/0FL01/tg-dating-agent/internal/storage"
 )
 
@@ -27,18 +28,20 @@ type ReplyAuditLogger struct {
 }
 
 type replyAuditRecord struct {
-	Timestamp   string `json:"timestamp"`
-	MBTI        string `json:"mbti"`
+	Timestamp string `json:"timestamp"`
+	Event     string `json:"event"`
+	Error     string `json:"error,omitempty"`
+	llm.Decision
+	Model       string `json:"model"`
 	ProfileText string `json:"profile_text"`
 	Prompt      string `json:"prompt"`
-	Response    string `json:"response"`
 }
 
 func NewReplyAuditLogger(path string) *ReplyAuditLogger {
 	return &ReplyAuditLogger{path: path}
 }
 
-func (l *ReplyAuditLogger) Append(mbti, profileText, prompt, response string) error {
+func (l *ReplyAuditLogger) Append(record replyAuditRecord) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -52,15 +55,9 @@ func (l *ReplyAuditLogger) Append(mbti, profileText, prompt, response string) er
 	}
 	defer f.Close()
 
-	rec := replyAuditRecord{
-		Timestamp:   time.Now().UTC().Format(time.RFC3339Nano),
-		MBTI:        mbti,
-		ProfileText: profileText,
-		Prompt:      prompt,
-		Response:    response,
-	}
+	record.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 
-	if err := json.NewEncoder(f).Encode(rec); err != nil {
+	if err := json.NewEncoder(f).Encode(record); err != nil {
 		return fmt.Errorf("encode reply audit record: %w", err)
 	}
 
@@ -103,18 +100,12 @@ func NewReplyAuditR2Appender(store storage.ObjectStore) *ReplyAuditR2Appender {
 	}
 }
 
-func (a *ReplyAuditR2Appender) Append(mbti, profileText, prompt, response string) error {
+func (a *ReplyAuditR2Appender) Append(record replyAuditRecord) error {
 	if a == nil {
 		return fmt.Errorf("reply audit r2 appender is nil")
 	}
 
-	record := replyAuditRecord{
-		Timestamp:   a.now().UTC().Format(time.RFC3339Nano),
-		MBTI:        mbti,
-		ProfileText: profileText,
-		Prompt:      prompt,
-		Response:    response,
-	}
+	record.Timestamp = a.now().UTC().Format(time.RFC3339Nano)
 
 	payload, err := json.Marshal(record)
 	if err != nil {
@@ -179,14 +170,14 @@ func NewCompositeReplyAuditAppender(appenders ...replyAuditAppender) *CompositeR
 	return &CompositeReplyAuditAppender{appenders: filtered}
 }
 
-func (a *CompositeReplyAuditAppender) Append(mbti, profileText, prompt, response string) error {
+func (a *CompositeReplyAuditAppender) Append(record replyAuditRecord) error {
 	if a == nil {
 		return fmt.Errorf("composite reply audit appender is nil")
 	}
 
 	var errs []error
 	for _, appender := range a.appenders {
-		if err := appender.Append(mbti, profileText, prompt, response); err != nil {
+		if err := appender.Append(record); err != nil {
 			errs = append(errs, err)
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -15,7 +16,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/0FL01/tg-dating-agent/internal/llm"
 	"github.com/0FL01/tg-dating-agent/internal/standalone"
@@ -34,7 +34,7 @@ var jitterRandMu sync.Mutex
 // Handler handles the dating bot automation
 type Handler struct {
 	config                       *standalone.Config
-	client                       llm.MultimodalSummarizer
+	client                       llm.MultimodalDecider
 	replyAudit                   replyAuditAppender
 	profileDedupe                profileDedupeChecker
 	tgClient                     *telegram.Client
@@ -56,6 +56,7 @@ type Handler struct {
 	lifecycleCtx                 context.Context
 	lifecycleCancel              context.CancelFunc
 	stopSleepOnce                sync.Once
+	decisionMu                   sync.Mutex
 	pauseWakeMu                  sync.Mutex
 	pauseWakeTimer               *time.Timer
 	pauseWakeDeadline            time.Time
@@ -63,7 +64,7 @@ type Handler struct {
 }
 
 type replyAuditAppender interface {
-	Append(mbti, profileText, prompt, response string) error
+	Append(replyAuditRecord) error
 }
 
 type profileDedupeChecker interface {
@@ -72,7 +73,7 @@ type profileDedupeChecker interface {
 }
 
 // NewHandler creates a new dating handler
-func NewHandler(cfg *standalone.Config, client llm.MultimodalSummarizer, tgClient *telegram.Client) *Handler {
+func NewHandler(cfg *standalone.Config, client llm.MultimodalDecider, tgClient *telegram.Client) *Handler {
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	var replyAudit replyAuditAppender
 	if cfg != nil {
@@ -199,12 +200,12 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 
 	if strings.Contains(strings.ToLower(text), PatternTooLong) {
 		log.Printf("[%s] Message was too long, retrying...", h.Name())
-		return h.retryGenerateMessage(h.lifecycleContext(), RetryTooLong)
+		return h.retryGenerateMessage(h.lifecycleContext(), text)
 	}
 
 	if strings.Contains(strings.ToLower(text), PatternTooShort) {
-		log.Printf("[%s] Message was too short, retrying with different prompt...", h.Name())
-		return h.retryGenerateMessage(h.lifecycleContext(), RetryTooShort)
+		log.Printf("[%s] Message was too short, retrying with rejection feedback...", h.Name())
+		return h.retryGenerateMessage(h.lifecycleContext(), text)
 	}
 
 	if strings.Contains(text, PatternWriteMessage) {
@@ -212,6 +213,9 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 	}
 
 	if strings.Contains(text, PatternViewProfiles) {
+		h.state.ClearProfileData()
+		h.state.ClearPendingMessage()
+		h.state.ResetRetry()
 		h.state.ClearStartupOwnProfileSkip()
 		log.Printf("[%s] Detected main menu, enqueuing profile viewing", h.Name())
 		if !h.state.Enqueue(ProfileJob{Type: "menu_recovery", Message: m}) {
@@ -426,20 +430,6 @@ func isDailyLimitMessage(text string) bool {
 }
 
 func (h *Handler) processProfile(ctx context.Context, m *telegram.NewMessage) error {
-	profileText := m.Text()
-	profileHash := buildProfileLLMCacheKey(profileText, photoIdentifiersFromMessage(m))
-	bioText := extractBioText(profileText)
-	bioLen := utf8.RuneCountInString(bioText)
-
-	if h.isLowQuality(profileText) {
-		log.Printf("[%s] Skipping low quality profile (bio_len=%d, min=%d): %s...",
-			h.Name(), bioLen, h.config.DatingMinBioLength, utils.Truncate(profileText, 20))
-		if !h.state.SetStateIfNotStopped(StateViewingProfiles) {
-			return nil
-		}
-		return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, profileHash)
-	}
-
 	if !h.state.SetStateIfNotStopped(StateViewingProfiles) {
 		return nil
 	}
@@ -479,88 +469,53 @@ func (h *Handler) downloadProfileData(ctx context.Context, m *telegram.NewMessag
 }
 
 func (h *Handler) generateAndSendLike(ctx context.Context, data ProfileData) error {
-	content := llm.MultimodalContent{
-		Text:       data.ProfileText,
-		ImagePaths: data.PhotoPaths,
+	h.decisionMu.Lock()
+	defer h.decisionMu.Unlock()
+	h.state.ClearProfileData()
+	h.state.ClearPendingMessage()
+	h.state.ResetRetry()
+	if h.shouldStopProcessing(ctx) {
+		return nil
 	}
-
 	cacheKey := buildProfileLLMCacheKey(data.ProfileText, data.PhotoIdentifiers)
 	if h.isDuplicateProfileActive(ctx, cacheKey) {
 		log.Printf("[%s] Profile dedupe hit (key=%s), skipping before LLM", h.Name(), utils.Truncate(cacheKey, 12))
 		return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, cacheKey)
 	}
 
-	cacheKeyLog := cacheKey
-	if len(cacheKeyLog) > 12 {
-		cacheKeyLog = cacheKeyLog[:12]
-	}
-
-	var (
-		mbti         string
-		generatedMsg string
-	)
-
-	if cachedMBTI, cachedOpener, ok := h.state.GetProfileLLMCache(cacheKey); ok && cachedMBTI != "" && cachedOpener != "" {
-		mbti = cachedMBTI
-		generatedMsg = cachedOpener
-		log.Printf("[%s] Profile LLM cache hit (key=%s, text_len=%d, photos=%d)", h.Name(), cacheKeyLog, len(strings.TrimSpace(data.ProfileText)), len(data.PhotoIdentifiers))
-	} else {
-		log.Printf("[%s] Profile LLM cache miss (key=%s, text_len=%d, photos=%d)", h.Name(), cacheKeyLog, len(strings.TrimSpace(data.ProfileText)), len(data.PhotoIdentifiers))
-
-		mbtiRaw, err := h.client.SummarizeMultimodal(ctx, h.model, h.config.DatingMBTIPrompt, content, h.temperature)
-		if err != nil {
-			log.Printf("[%s] Failed to analyze MBTI: %v, skipping profile", h.Name(), err)
-			return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, cacheKey)
-		}
-
-		parsedMBTI, ok := parseMBTI(mbtiRaw)
-		if !ok {
-			log.Printf("[%s] Failed to parse MBTI from response %q, skipping profile", h.Name(), utils.Truncate(mbtiRaw, 60))
-			return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, cacheKey)
-		}
-		mbti = parsedMBTI
-
-		if !isMBTIAllowed(mbti, h.config.DatingMBTIAllowlist) {
-			log.Printf("[%s] MBTI %s is not in allowlist %v, skipping profile", h.Name(), mbti, h.config.DatingMBTIAllowlist)
-			return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, cacheKey)
-		}
-
-		log.Printf("[%s] MBTI %s is allowed, generating reply", h.Name(), mbti)
-		if shouldStopWorker(ctx, h.state.ShouldQuit()) || h.state.IsStopped() {
+	content, err := llm.PrepareImages(ctx, llm.MultimodalContent{Text: data.ProfileText, ImagePaths: data.PhotoPaths})
+	if err != nil {
+		if h.shouldStopProcessing(ctx) {
 			return nil
 		}
-
-		generatedMsg, err = h.client.SummarizeMultimodal(ctx, h.model, h.prompt, content, h.temperature)
-		if err != nil {
-			log.Printf("[%s] Failed to generate message: %v", h.Name(), err)
-			return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, cacheKey)
-		}
-		h.appendReplyAudit(mbti, data.ProfileText, h.prompt, generatedMsg)
-
-		h.state.SetProfileLLMCache(cacheKey, mbti, generatedMsg)
-		log.Printf("[%s] Profile LLM cache stored (key=%s)", h.Name(), cacheKeyLog)
-	}
-
-	if !isMBTIAllowed(mbti, h.config.DatingMBTIAllowlist) {
-		log.Printf("[%s] MBTI %s is not in allowlist %v, skipping profile", h.Name(), mbti, h.config.DatingMBTIAllowlist)
+		log.Printf("[%s] Cannot prepare profile photos: %v", h.Name(), err)
 		return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, cacheKey)
 	}
-
-	log.Printf("[%s] MBTI %s is allowed, generating reply", h.Name(), mbti)
-	if shouldStopWorker(ctx, h.state.ShouldQuit()) || h.state.IsStopped() {
+	data.Content = content
+	data.PhotoPaths = nil
+	data.Prompt = h.prompt
+	decision, ok := h.state.GetProfileLLMCache(cacheKey)
+	if !ok {
+		decision, err = h.generateDecision(ctx, data, "")
+		if err == nil {
+			h.state.SetProfileLLMCache(cacheKey, decision)
+		}
+	} else {
+		h.appendReplyAudit("decision", decision, data, "")
+	}
+	if h.shouldStopProcessing(ctx) {
 		return nil
 	}
-
-	data.MBTI = mbti
+	if err != nil || decision.Validate() != nil || decision.Action == "skip" {
+		if err != nil {
+			log.Printf("[%s] Decision failed, skipping profile: %v", h.Name(), err)
+		}
+		return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, cacheKey)
+	}
+	data.Decision = decision
 	h.state.SetProfileData(&data)
 	h.state.ResetRetry()
-
-	log.Printf("[%s] Generated message: %s", h.Name(), utils.Truncate(generatedMsg, 100))
-	if shouldStopWorker(ctx, h.state.ShouldQuit()) || h.state.IsStopped() {
-		return nil
-	}
-
-	h.state.SetPendingMessage(generatedMsg)
+	h.state.SetPendingMessage(decision.Message)
 	if !h.state.SetStateIfNotStopped(StateWaitingPrompt) {
 		return nil
 	}
@@ -568,52 +523,48 @@ func (h *Handler) generateAndSendLike(ctx context.Context, data ProfileData) err
 	return h.clickButtonAndMarkProcessed(ctx, ButtonLikeMessage, cacheKey)
 }
 
-func parseMBTI(response string) (string, bool) {
-	upper := strings.ToUpper(response)
-	tokens := strings.FieldsFunc(upper, func(r rune) bool {
-		return r < 'A' || r > 'Z'
-	})
-
-	for _, token := range tokens {
-		if isValidMBTI(token) {
-			return token, true
+func (h *Handler) generateDecision(ctx context.Context, data ProfileData, feedback string) (llm.Decision, error) {
+	var decision llm.Decision
+	var err error
+	if h.client == nil {
+		h.appendReplyAudit("error", llm.Decision{}, data, "Decision client is not configured")
+		return decision, errors.New("decision client is not configured")
+	}
+	for attempt := 0; attempt <= MaxRetries; attempt++ {
+		if h.shouldStopProcessing(ctx) {
+			return decision, context.Canceled
 		}
-	}
-
-	return "", false
-}
-
-func isMBTIAllowed(mbti string, allowlist []string) bool {
-	if len(allowlist) == 0 {
-		return false
-	}
-
-	for _, allowed := range allowlist {
-		if mbti == allowed {
-			return true
+		content := data.Content
+		content.Text = "Profile:\n" + data.ProfileText
+		if feedback != "" {
+			content.Text += "\n\nCorrection feedback:\n" + feedback
 		}
+		raw, callErr := h.client.DecideMultimodal(ctx, h.model, data.Prompt, content, h.temperature)
+		if callErr != nil {
+			// Provider errors may contain response bodies; do not persist them.
+			h.appendReplyAudit("error", llm.Decision{}, data, "LLM request failed")
+			return decision, callErr
+		}
+		decision, err = llm.ParseDecision(raw)
+		if err == nil {
+			h.appendReplyAudit("decision", decision, data, "")
+			return decision, nil
+		}
+		h.appendReplyAudit("invalid_response", llm.Decision{}, data, "Response failed decision validation")
+		feedback += fmt.Sprintf("\nPrevious output: %q\nValidation error: %s\nCorrect the JSON without changing the original selection criteria.", raw, err)
 	}
-
-	return false
-}
-
-func isValidMBTI(mbti string) bool {
-	switch mbti {
-	case "INTJ", "INTP", "ENTJ", "ENTP",
-		"INFJ", "INFP", "ENFJ", "ENFP",
-		"ISTJ", "ISFJ", "ESTJ", "ESFJ",
-		"ISTP", "ISFP", "ESTP", "ESFP":
-		return true
-	default:
-		return false
-	}
+	return llm.Decision{}, err
 }
 
 func (h *Handler) sendPendingMessage(m *telegram.NewMessage) error {
-	msg := h.state.GetPendingMessage()
-	if msg == "" {
-		log.Printf("[%s] No pending message to send, skipping", h.Name())
+	h.decisionMu.Lock()
+	defer h.decisionMu.Unlock()
+	if h.state.GetState() != StateWaitingPrompt {
 		return nil
+	}
+	msg := h.state.GetPendingMessage()
+	if err := (llm.Decision{Action: "send", Message: msg}).Validate(); err != nil {
+		return h.stopMessageEntry(h.lifecycleContext())
 	}
 
 	ctx := h.lifecycleContext()
@@ -637,7 +588,7 @@ func (h *Handler) sendPendingMessage(m *telegram.NewMessage) error {
 		log.Printf("[%s] %v", h.Name(), err)
 		return err
 	}
-	err := h.sendDatingMessage(ctx, peer, msg)
+	err := h.sendOpener(ctx, peer, msg)
 	if err == nil {
 		h.finalizeSendState()
 	}
@@ -742,7 +693,24 @@ func (h *Handler) sendDatingMessage(ctx context.Context, peer telegram.InputPeer
 	return err
 }
 
-func (h *Handler) retryGenerateMessage(ctx context.Context, retryType RetryType) error {
+func (h *Handler) sendOpener(ctx context.Context, peer telegram.InputPeer, msg string) error {
+	// Snapshot before sending: shutdown may clear state while the API is in flight.
+	data := ProfileData{Prompt: h.prompt}
+	if profile := h.state.GetProfileData(); profile != nil {
+		data = *profile
+	}
+	decision := llm.Decision{Action: "send", Reason: data.Decision.Reason, Message: msg}
+	if err := h.sendDatingMessage(ctx, peer, msg); err != nil {
+		h.appendReplyAudit("error", decision, data, "Telegram send failed")
+		return err
+	}
+	h.appendReplyAudit("sent", decision, data, "")
+	return nil
+}
+
+func (h *Handler) retryGenerateMessage(ctx context.Context, rejection string) error {
+	h.decisionMu.Lock()
+	defer h.decisionMu.Unlock()
 	if h.shouldStopProcessing(ctx) {
 		return nil
 	}
@@ -750,76 +718,61 @@ func (h *Handler) retryGenerateMessage(ctx context.Context, retryType RetryType)
 	retryCount := h.state.IncrementRetry()
 	pendingMsg := h.state.GetPendingMessage()
 
-	log.Printf("[%s] Retry attempt %d/%d (type: %v)", h.Name(), retryCount, MaxRetries, retryType)
+	log.Printf("[%s] Retry attempt %d/%d after bot rejection", h.Name(), retryCount, MaxRetries)
 
 	if retryCount > MaxRetries {
-		log.Printf("[%s] Max retries reached, using fallback", h.Name())
-		return h.handleMaxRetriesReached(ctx, retryType, pendingMsg)
+		log.Printf("[%s] Max retries reached, stopping locally", h.Name())
+		return h.stopMessageEntry(ctx)
 	}
 
 	profileData := h.state.GetProfileData()
 	if profileData == nil {
-		log.Printf("[%s] No profile data for retry, using fallback", h.Name())
-		return h.handleMaxRetriesReached(ctx, retryType, pendingMsg)
+		log.Printf("[%s] No profile data for retry, stopping locally", h.Name())
+		return h.stopMessageEntry(ctx)
 	}
 
-	var retryPrompt string
-	switch retryType {
-	case RetryTooShort:
-		retryPrompt = TooShortRetryPrompt
-	case RetryTooLong:
-		retryPrompt = TooLongRetryPrompt + pendingMsg
-	}
-
-	content := llm.MultimodalContent{
-		Text:       profileData.ProfileText,
-		ImagePaths: profileData.PhotoPaths,
-	}
-
-	generatedMsg, err := h.client.SummarizeMultimodal(ctx, h.model, retryPrompt, content, h.temperature)
+	previous, _ := json.Marshal(profileData.Decision)
+	decision, err := h.generateDecision(ctx, *profileData, fmt.Sprintf("Previous output: %s\nPrevious message: %q\nTelegram rejection: %s", previous, pendingMsg, rejection))
 	if err != nil {
-		if h.shouldStopProcessing(ctx) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if h.shouldStopProcessing(ctx) {
 			return nil
 		}
-		log.Printf("[%s] Failed to regenerate message: %v, using fallback", h.Name(), err)
-		return h.handleMaxRetriesReached(ctx, retryType, pendingMsg)
+		log.Printf("[%s] Failed to regenerate message: %v, stopping locally", h.Name(), err)
+		return h.stopMessageEntry(ctx)
 	}
-	h.appendReplyAudit(profileData.MBTI, profileData.ProfileText, retryPrompt, generatedMsg)
-
-	log.Printf("[%s] Regenerated message (attempt %d): %s", h.Name(), retryCount, utils.Truncate(generatedMsg, 100))
 	if h.shouldStopProcessing(ctx) {
 		return nil
 	}
 
-	h.state.SetPendingMessage(generatedMsg)
-	return h.sendTruncatedMessage(ctx, generatedMsg)
+	if decision.Action == "skip" {
+		return h.stopMessageEntry(ctx)
+	}
+	profileData.Decision = decision
+	h.state.SetProfileData(profileData)
+	h.state.SetProfileLLMCache(buildProfileLLMCacheKey(profileData.ProfileText, profileData.PhotoIdentifiers), decision)
+	h.state.SetPendingMessage(decision.Message)
+	return h.sendValidatedMessage(ctx, decision.Message)
 }
 
-func (h *Handler) handleMaxRetriesReached(ctx context.Context, retryType RetryType, pendingMsg string) error {
+func (h *Handler) stopMessageEntry(ctx context.Context) error {
 	if h.shouldStopProcessing(ctx) {
 		return nil
 	}
 
-	switch retryType {
-	case RetryTooLong:
-		truncatedMsg := truncateMessage(pendingMsg, MaxMsgLength)
-		if h.shouldStopProcessing(ctx) {
-			return nil
-		}
-		h.state.SetPendingMessage(truncatedMsg)
-		return h.sendTruncatedMessage(ctx, truncatedMsg)
-	case RetryTooShort:
-		fallbackMsg := "Привет! Заинтересовал(а) твой профиль, давай познакомимся? 😊"
-		if h.shouldStopProcessing(ctx) {
-			return nil
-		}
-		h.state.SetPendingMessage(fallbackMsg)
-		return h.sendTruncatedMessage(ctx, fallbackMsg)
-	}
+	// No proven cancel button exists in message entry. Stop locally, never send
+	// sleep/dislike commands that the bot could interpret as an opener.
+	h.state.BeginShutdown()
+	h.clearPauseWakeup()
+	h.cancelLifecycleContext()
+	h.state.CancelWorkerContext()
+	h.state.StopWorker()
 	return nil
 }
 
-func (h *Handler) sendTruncatedMessage(ctx context.Context, msg string) error {
+func (h *Handler) sendValidatedMessage(ctx context.Context, msg string) error {
+	if err := (llm.Decision{Action: "send", Message: msg}).Validate(); err != nil {
+		return h.stopMessageEntry(ctx)
+	}
 	if h.shouldStopProcessing(ctx) {
 		return nil
 	}
@@ -840,7 +793,7 @@ func (h *Handler) sendTruncatedMessage(ctx context.Context, msg string) error {
 		log.Printf("[%s] %v", h.Name(), err)
 		return err
 	}
-	err := h.sendDatingMessage(ctx, peer, msg)
+	err := h.sendOpener(ctx, peer, msg)
 	if err == nil {
 		h.finalizeSendState()
 	}
@@ -857,34 +810,12 @@ func (h *Handler) sendTruncatedMessage(ctx context.Context, msg string) error {
 	return nil
 }
 
-func truncateMessage(msg string, maxLen int) string {
-	runes := []rune(msg)
-	if len(runes) <= maxLen {
-		return msg
-	}
-
-	truncatedRunes := runes[:maxLen]
-	lastSpace := -1
-	for i := len(truncatedRunes) - 1; i >= 0; i-- {
-		if truncatedRunes[i] == ' ' {
-			lastSpace = i
-			break
-		}
-	}
-
-	if lastSpace > maxLen/2 {
-		return string(truncatedRunes[:lastSpace])
-	}
-
-	return string(truncatedRunes)
-}
-
-func (h *Handler) appendReplyAudit(mbti, profileText, prompt, response string) {
+func (h *Handler) appendReplyAudit(event string, decision llm.Decision, data ProfileData, detail string) {
 	if h.replyAudit == nil {
 		return
 	}
 
-	if err := h.replyAudit.Append(mbti, profileText, prompt, response); err != nil {
+	if err := h.replyAudit.Append(replyAuditRecord{Event: event, Decision: decision, Model: h.model, ProfileText: data.ProfileText, Prompt: data.Prompt, Error: detail}); err != nil {
 		log.Printf("[%s] Reply audit append failed: %v", h.Name(), err)
 	}
 }
@@ -1118,19 +1049,6 @@ func (h *Handler) handleAlbumJob(ctx context.Context, a *telegram.Album) error {
 	h.cacheBotPeerFromAlbum(a)
 
 	profileText := h.resolveAlbumProfileText(a)
-	profileHash := buildProfileLLMCacheKey(profileText, photoIdentifiersFromAlbum(a))
-	bioText := extractBioText(profileText)
-	bioLen := utf8.RuneCountInString(bioText)
-
-	if h.isLowQuality(profileText) {
-		log.Printf("[%s] Skipping low quality album profile (bio_len=%d, min=%d): %s...",
-			h.Name(), bioLen, h.config.DatingMinBioLength, utils.Truncate(profileText, 20))
-		if !h.state.SetStateIfNotStopped(StateViewingProfiles) {
-			return nil
-		}
-		return h.clickButtonAndMarkProcessed(ctx, ButtonDislike, profileHash)
-	}
-
 	if !h.state.SetStateIfNotStopped(StateViewingProfiles) {
 		return nil
 	}
@@ -1801,34 +1719,6 @@ func (h *Handler) resolveAlbumProfileText(a *telegram.Album) string {
 	}
 
 	return ""
-}
-
-func (h *Handler) isLowQuality(text string) bool {
-	if !h.config.DatingSkipLowQuality {
-		return false
-	}
-	bioText := extractBioText(text)
-	return utf8.RuneCountInString(bioText) < h.config.DatingMinBioLength
-}
-
-func extractBioText(profileText string) string {
-	trimmed := strings.TrimSpace(profileText)
-	if trimmed == "" {
-		return ""
-	}
-
-	separators := []string{" – ", " — ", " - ", "–", "—", "-"}
-	for _, sep := range separators {
-		idx := strings.Index(trimmed, sep)
-		if idx < 0 {
-			continue
-		}
-
-		bio := strings.TrimSpace(trimmed[idx+len(sep):])
-		return bio
-	}
-
-	return trimmed
 }
 
 func writableTempDownloadDir() string {

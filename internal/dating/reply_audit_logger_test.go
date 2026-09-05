@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/0FL01/tg-dating-agent/internal/llm"
 )
 
 type stubReplyAuditObjectStore struct {
@@ -64,7 +66,7 @@ func TestReplyAuditLoggerAppendWritesValidJSONLine(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "audit", "reply.jsonl")
 	logger := NewReplyAuditLogger(logPath)
 
-	if err := logger.Append("INTJ", "Alice - bio", "hello", "hi there"); err != nil {
+	if err := logger.Append(replyAuditRecord{Event: "decision", Decision: llm.Decision{Action: "send", Reason: "fit", Message: "hi there"}, Model: "model", ProfileText: "Alice - bio", Prompt: "hello"}); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 
@@ -83,8 +85,18 @@ func TestReplyAuditLoggerAppendWritesValidJSONLine(t *testing.T) {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
 
-	if rec.MBTI != "INTJ" {
-		t.Fatalf("mbti = %q, want %q", rec.MBTI, "INTJ")
+	if rec.Event != "decision" || rec.Action != "send" {
+		t.Fatalf("action = %q, want %q", rec.Action, "send")
+	}
+	if rec.Reason != "fit" || rec.Model != "model" {
+		t.Fatalf("missing reason/model: %+v", rec)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["mbti"] != nil || fields["response"] != nil {
+		t.Fatal("legacy MBTI/response fields emitted")
 	}
 	if rec.ProfileText != "Alice - bio" {
 		t.Fatalf("profile_text = %q, want %q", rec.ProfileText, "Alice - bio")
@@ -92,8 +104,8 @@ func TestReplyAuditLoggerAppendWritesValidJSONLine(t *testing.T) {
 	if rec.Prompt != "hello" {
 		t.Fatalf("prompt = %q, want %q", rec.Prompt, "hello")
 	}
-	if rec.Response != "hi there" {
-		t.Fatalf("response = %q, want %q", rec.Response, "hi there")
+	if rec.Message != "hi there" {
+		t.Fatalf("response = %q, want %q", rec.Message, "hi there")
 	}
 	if rec.Timestamp == "" {
 		t.Fatal("timestamp is empty")
@@ -110,10 +122,10 @@ func TestReplyAuditLoggerAppendAppendsMultipleEntries(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "reply.jsonl")
 	logger := NewReplyAuditLogger(logPath)
 
-	if err := logger.Append("INTJ", "bio 1", "prompt 1", "response 1"); err != nil {
+	if err := logger.Append(replyAuditRecord{Event: "decision", Decision: llm.Decision{Action: "send", Reason: "fit", Message: "response 1"}, Model: "model", ProfileText: "bio 1", Prompt: "prompt 1"}); err != nil {
 		t.Fatalf("first Append() error = %v", err)
 	}
-	if err := logger.Append("INFJ", "bio 2", "prompt 2", "response 2"); err != nil {
+	if err := logger.Append(replyAuditRecord{Event: "decision", Decision: llm.Decision{Action: "skip", Reason: "no hook"}, Model: "model", ProfileText: "bio 2", Prompt: "prompt 2"}); err != nil {
 		t.Fatalf("second Append() error = %v", err)
 	}
 
@@ -131,7 +143,7 @@ func TestReplyAuditLoggerAppendAppendsMultipleEntries(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
 		t.Fatalf("first line unmarshal error = %v", err)
 	}
-	if first.MBTI != "INTJ" || first.ProfileText != "bio 1" || first.Prompt != "prompt 1" || first.Response != "response 1" {
+	if first.Action != "send" || first.ProfileText != "bio 1" || first.Prompt != "prompt 1" || first.Message != "response 1" {
 		t.Fatalf("first record = %+v, want mbti/profile_text/prompt/response for first append", first)
 	}
 
@@ -139,7 +151,7 @@ func TestReplyAuditLoggerAppendAppendsMultipleEntries(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[1]), &second); err != nil {
 		t.Fatalf("second line unmarshal error = %v", err)
 	}
-	if second.MBTI != "INFJ" || second.ProfileText != "bio 2" || second.Prompt != "prompt 2" || second.Response != "response 2" {
+	if second.Action != "skip" || second.Reason != "no hook" || second.Model != "model" || second.ProfileText != "bio 2" || second.Prompt != "prompt 2" || second.Message != "" {
 		t.Fatalf("second record = %+v, want mbti/profile_text/prompt/response for second append", second)
 	}
 }
@@ -148,7 +160,7 @@ func TestReplyAuditLoggerAppendReturnsErrorOnOpenFailure(t *testing.T) {
 	dirPath := t.TempDir()
 	logger := NewReplyAuditLogger(dirPath)
 
-	if err := logger.Append("INTJ", "bio", "prompt", "response"); err == nil {
+	if err := logger.Append(replyAuditRecord{Event: "decision", Decision: llm.Decision{Action: "send", Reason: "fit", Message: "response"}, Model: "model", ProfileText: "bio", Prompt: "prompt"}); err == nil {
 		t.Fatal("Append() error = nil, want non-nil")
 	}
 }
@@ -166,7 +178,7 @@ func TestReplyAuditLoggerAppendConcurrentWrites(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := logger.Append("INTJ", "bio "+strconv.Itoa(i), "prompt "+strconv.Itoa(i), "response"); err != nil {
+			if err := logger.Append(replyAuditRecord{Event: "decision", Decision: llm.Decision{Action: "send", Reason: "fit", Message: "response"}, Model: "model", ProfileText: "bio " + strconv.Itoa(i), Prompt: "prompt " + strconv.Itoa(i)}); err != nil {
 				errCh <- err
 			}
 		}()
@@ -194,7 +206,7 @@ func TestReplyAuditLoggerAppendConcurrentWrites(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			t.Fatalf("line %d unmarshal error = %v", idx, err)
 		}
-		if rec.MBTI != "INTJ" || !strings.HasPrefix(rec.ProfileText, "bio ") || rec.Response != "response" {
+		if rec.Action != "send" || !strings.HasPrefix(rec.ProfileText, "bio ") || rec.Message != "response" {
 			t.Fatalf("line %d record = %+v, want mbti INTJ, profile_text with bio prefix, and response response", idx, rec)
 		}
 	}
@@ -207,7 +219,7 @@ func TestReplyAuditR2AppenderAppendWritesJSONLChunk(t *testing.T) {
 		return time.Date(2026, time.March, 11, 9, 10, 11, 123456789, time.UTC)
 	}
 
-	if err := appender.Append("INTJ", "Alice bio", "prompt", "hello"); err != nil {
+	if err := appender.Append(replyAuditRecord{Event: "sent", Decision: llm.Decision{Action: "send", Reason: "fit", Message: "hello"}, Model: "model", ProfileText: "Alice bio", Prompt: "prompt"}); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 
@@ -239,7 +251,7 @@ func TestReplyAuditR2AppenderAppendWritesJSONLChunk(t *testing.T) {
 	if rec.Timestamp != "2026-03-11T09:10:11.123456789Z" {
 		t.Fatalf("timestamp = %q, want %q", rec.Timestamp, "2026-03-11T09:10:11.123456789Z")
 	}
-	if rec.MBTI != "INTJ" || rec.ProfileText != "Alice bio" || rec.Prompt != "prompt" || rec.Response != "hello" {
+	if rec.Event != "sent" || rec.Action != "send" || rec.Reason != "fit" || rec.Model != "model" || rec.ProfileText != "Alice bio" || rec.Prompt != "prompt" || rec.Message != "hello" {
 		t.Fatalf("record = %+v, want expected payload fields", rec)
 	}
 }
@@ -251,10 +263,10 @@ func TestReplyAuditR2AppenderAppendGeneratesUniqueKeys(t *testing.T) {
 		return time.Date(2026, time.March, 11, 9, 10, 11, 123456789, time.UTC)
 	}
 
-	if err := appender.Append("INTJ", "bio1", "p1", "r1"); err != nil {
+	if err := appender.Append(replyAuditRecord{Event: "decision", Decision: llm.Decision{Action: "send", Reason: "fit", Message: "r1"}, Model: "model", ProfileText: "bio1", Prompt: "p1"}); err != nil {
 		t.Fatalf("first Append() error = %v", err)
 	}
-	if err := appender.Append("INFJ", "bio2", "p2", "r2"); err != nil {
+	if err := appender.Append(replyAuditRecord{Event: "sent", Decision: llm.Decision{Action: "send", Reason: "fit", Message: "r2"}, Model: "model", ProfileText: "bio2", Prompt: "p2"}); err != nil {
 		t.Fatalf("second Append() error = %v", err)
 	}
 
@@ -276,7 +288,7 @@ type compositeStubReplyAuditAppender struct {
 	err   error
 }
 
-func (s *compositeStubReplyAuditAppender) Append(_, _, _, _ string) error {
+func (s *compositeStubReplyAuditAppender) Append(_ replyAuditRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -300,7 +312,7 @@ func TestCompositeReplyAuditAppenderAppendAttemptsAllAppenders(t *testing.T) {
 		t.Fatal("NewCompositeReplyAuditAppender() = nil, want non-nil")
 	}
 
-	err := composite.Append("INTJ", "bio", "prompt", "response")
+	err := composite.Append(replyAuditRecord{Event: "decision", Decision: llm.Decision{Action: "send", Reason: "fit", Message: "response"}, Model: "model", ProfileText: "bio", Prompt: "prompt"})
 	if err == nil {
 		t.Fatal("Append() error = nil, want non-nil")
 	}
@@ -316,5 +328,47 @@ func TestCompositeReplyAuditAppenderAppendAttemptsAllAppenders(t *testing.T) {
 	}
 	if third.callCount() != 1 {
 		t.Fatalf("third call count = %d, want 1", third.callCount())
+	}
+}
+
+func TestAuditEventsPersistToLocalAndR2(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	store := &stubReplyAuditObjectStore{}
+	appender := NewCompositeReplyAuditAppender(NewReplyAuditLogger(path), NewReplyAuditR2Appender(store))
+	for _, event := range []string{"decision", "invalid_response", "error", "sent"} {
+		record := replyAuditRecord{Event: event, Model: "model", ProfileText: "bio", Prompt: "criteria"}
+		if event == "decision" || event == "sent" {
+			record.Decision = llm.Decision{Action: "send", Reason: "fit", Message: "hello"}
+		} else {
+			record.Error = "Request or validation failed"
+		}
+		if err := appender.Append(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	calls := store.snapshotCalls()
+	if len(lines) != 4 || len(calls) != 4 {
+		t.Fatalf("local=%d R2=%d", len(lines), len(calls))
+	}
+	for i, event := range []string{"decision", "invalid_response", "error", "sent"} {
+		var local, remote replyAuditRecord
+		if err := json.Unmarshal([]byte(lines[i]), &local); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(calls[i].body, &remote); err != nil {
+			t.Fatal(err)
+		}
+		local.Timestamp, remote.Timestamp = "", ""
+		if local != remote || local.Event != event || local.Model != "model" {
+			t.Fatalf("local=%+v remote=%+v", local, remote)
+		}
+		if (event == "error" || event == "invalid_response") && (local.Error == "" || local.Decision != (llm.Decision{})) {
+			t.Fatalf("failure audit=%+v", local)
+		}
 	}
 }

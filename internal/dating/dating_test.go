@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/0FL01/tg-dating-agent/internal/llm"
 	"github.com/0FL01/tg-dating-agent/internal/standalone"
@@ -28,7 +27,9 @@ type blockingSummarizer struct {
 type scriptedSummarizer struct {
 	mu           sync.Mutex
 	responses    []string
+	err          error
 	prompts      []string
+	contents     []llm.MultimodalContent
 	callCount    int
 	cancelOnCall int
 	cancel       context.CancelFunc
@@ -40,13 +41,18 @@ func (s *scriptedSummarizer) snapshotCallCount() int {
 	return s.callCount
 }
 
-func (s *scriptedSummarizer) SummarizeMultimodal(_ context.Context, _ string, prompt string, _ llm.MultimodalContent, _ float64) (string, error) {
+func (s *scriptedSummarizer) DecideMultimodal(_ context.Context, _ string, prompt string, content llm.MultimodalContent, _ float64) (string, error) {
 	s.mu.Lock()
 	call := s.callCount + 1
 	s.callCount = call
 	s.prompts = append(s.prompts, prompt)
+	s.contents = append(s.contents, content)
 	if call > len(s.responses) {
+		err := s.err
 		s.mu.Unlock()
+		if err != nil {
+			return "", err
+		}
 		return "", errors.New("unexpected summarize call")
 	}
 	response := s.responses[call-1]
@@ -61,10 +67,12 @@ func (s *scriptedSummarizer) SummarizeMultimodal(_ context.Context, _ string, pr
 }
 
 type auditCall struct {
-	mbti        string
+	event       string
+	detail      string
+	decision    llm.Decision
+	model       string
 	profileText string
 	prompt      string
-	response    string
 }
 
 type stubReplyAuditLogger struct {
@@ -82,11 +90,11 @@ type stubProfileDedupeStore struct {
 	markCalls   []string
 }
 
-func (s *stubReplyAuditLogger) Append(mbti, profileText, prompt, response string) error {
+func (s *stubReplyAuditLogger) Append(record replyAuditRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.calls = append(s.calls, auditCall{mbti: mbti, profileText: profileText, prompt: prompt, response: response})
+	s.calls = append(s.calls, auditCall{event: record.Event, detail: record.Error, decision: record.Decision, model: record.Model, profileText: record.ProfileText, prompt: record.Prompt})
 	return s.err
 }
 
@@ -137,7 +145,7 @@ func (s *stubProfileDedupeStore) snapshotMarkCalls() []string {
 	return out
 }
 
-func (s *blockingSummarizer) SummarizeMultimodal(ctx context.Context, _ string, _ string, _ llm.MultimodalContent, _ float64) (string, error) {
+func (s *blockingSummarizer) DecideMultimodal(ctx context.Context, _ string, _ string, _ llm.MultimodalContent, _ float64) (string, error) {
 	s.startedOnce.Do(func() {
 		close(s.started)
 	})
@@ -150,42 +158,6 @@ func (s *blockingSummarizer) SummarizeMultimodal(ctx context.Context, _ string, 
 		return "", ctx.Err()
 	case <-s.release:
 		return "INTJ", nil
-	}
-}
-
-func TestTruncateMessageASCII(t *testing.T) {
-	tests := []struct {
-		name   string
-		msg    string
-		maxLen int
-		want   string
-	}{
-		{
-			name:   "shorter than limit unchanged",
-			msg:    "hello",
-			maxLen: 10,
-			want:   "hello",
-		},
-		{
-			name:   "truncate by last space when far enough",
-			msg:    "hello world from bot",
-			maxLen: 12,
-			want:   "hello world",
-		},
-		{
-			name:   "fallback to hard truncation when last space too early",
-			msg:    "hi therefriend",
-			maxLen: 8,
-			want:   "hi there",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := truncateMessage(tt.msg, tt.maxLen); got != tt.want {
-				t.Fatalf("truncateMessage(%q, %d) = %q, want %q", tt.msg, tt.maxLen, got, tt.want)
-			}
-		})
 	}
 }
 
@@ -1218,135 +1190,20 @@ func waitGroupWithTimeout(t *testing.T, wg *sync.WaitGroup, waitFor string) {
 	mustReceiveSignal(t, done, waitFor)
 }
 
-func TestTruncateMessageUTF8(t *testing.T) {
-	tests := []struct {
-		name      string
-		msg       string
-		maxLen    int
-		want      string
-		wantRunes int
-	}{
-		{
-			name:      "cyrillic with word boundary",
-			msg:       "Привет мир как дела",
-			maxLen:    12,
-			want:      "Привет мир",
-			wantRunes: 10,
-		},
-		{
-			name:      "emoji and cyrillic without spaces",
-			msg:       "Привет😊мир",
-			maxLen:    7,
-			want:      "Привет😊",
-			wantRunes: 7,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := truncateMessage(tt.msg, tt.maxLen)
-			if got != tt.want {
-				t.Fatalf("truncateMessage(%q, %d) = %q, want %q", tt.msg, tt.maxLen, got, tt.want)
-			}
-			if !utf8.ValidString(got) {
-				t.Fatalf("truncateMessage(%q, %d) returned invalid UTF-8: %q", tt.msg, tt.maxLen, got)
-			}
-			if gotRunes := utf8.RuneCountInString(got); gotRunes != tt.wantRunes {
-				t.Fatalf("truncateMessage(%q, %d) rune count = %d, want %d", tt.msg, tt.maxLen, gotRunes, tt.wantRunes)
-			}
-		})
-	}
-}
-
-func TestParseMBTI(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		wantMBTI string
-		wantOK   bool
-	}{
-		{name: "exact token", input: "INTJ", wantMBTI: "INTJ", wantOK: true},
-		{name: "lowercase token in sentence", input: "likely enfp type", wantMBTI: "ENFP", wantOK: true},
-		{name: "punctuation wrapped", input: "Result: **infj**", wantMBTI: "INFJ", wantOK: true},
-		{name: "first valid among many", input: "abc ENFJ/INFJ", wantMBTI: "ENFJ", wantOK: true},
-		{name: "invalid token", input: "ABCD", wantMBTI: "", wantOK: false},
-		{name: "empty string", input: "", wantMBTI: "", wantOK: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotMBTI, gotOK := parseMBTI(tt.input)
-			if gotOK != tt.wantOK {
-				t.Fatalf("parseMBTI(%q) ok = %v, want %v", tt.input, gotOK, tt.wantOK)
-			}
-			if gotMBTI != tt.wantMBTI {
-				t.Fatalf("parseMBTI(%q) mbti = %q, want %q", tt.input, gotMBTI, tt.wantMBTI)
-			}
-		})
-	}
-}
-
-func TestIsValidMBTI(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  bool
-	}{
-		{name: "valid type", input: "INTJ", want: true},
-		{name: "valid extrovert type", input: "ESFP", want: true},
-		{name: "lowercase rejected", input: "intj", want: false},
-		{name: "unknown rejected", input: "ABCD", want: false},
-		{name: "short rejected", input: "INT", want: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isValidMBTI(tt.input); got != tt.want {
-				t.Fatalf("isValidMBTI(%q) = %v, want %v", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestIsMBTIAllowed(t *testing.T) {
-	tests := []struct {
-		name      string
-		mbti      string
-		allowlist []string
-		want      bool
-	}{
-		{name: "allowed exact match", mbti: "INTJ", allowlist: []string{"INTJ", "ENFP"}, want: true},
-		{name: "not present", mbti: "INFJ", allowlist: []string{"INTJ", "ENFP"}, want: false},
-		{name: "empty allowlist", mbti: "INTJ", allowlist: nil, want: false},
-		{name: "case sensitive input", mbti: "intj", allowlist: []string{"INTJ"}, want: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isMBTIAllowed(tt.mbti, tt.allowlist); got != tt.want {
-				t.Fatalf("isMBTIAllowed(%q, %v) = %v, want %v", tt.mbti, tt.allowlist, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestGenerateAndSendLikeAppendsReplyAudit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	summarizer := &scriptedSummarizer{
-		responses:    []string{"INTJ", "generated"},
-		cancelOnCall: 2,
+		responses:    []string{`{"action":"send","reason":"fit","message":"generated"}`},
+		cancelOnCall: 1,
 		cancel:       cancel,
 	}
 	audit := &stubReplyAuditLogger{}
 
 	h := &Handler{
-		state: NewStateMachine(),
-		config: &standalone.Config{
-			DatingMBTIPrompt:    "mbti prompt",
-			DatingMBTIAllowlist: []string{"INTJ"},
-		},
+		state:       NewStateMachine(),
+		config:      &standalone.Config{},
 		client:      summarizer,
 		model:       "model",
 		prompt:      "reply prompt",
@@ -1364,8 +1221,8 @@ func TestGenerateAndSendLikeAppendsReplyAudit(t *testing.T) {
 		t.Fatalf("reply audit call count = %d, want 1", len(calls))
 	}
 
-	if calls[0].mbti != "INTJ" || calls[0].profileText != "bio" || calls[0].prompt != "reply prompt" || calls[0].response != "generated" {
-		t.Fatalf("reply audit call = %+v, want mbti=%q profile_text=%q prompt=%q response=%q", calls[0], "INTJ", "bio", "reply prompt", "generated")
+	if calls[0].decision != (llm.Decision{Action: "send", Reason: "fit", Message: "generated"}) || calls[0].model != "model" || calls[0].profileText != "bio" || calls[0].prompt != "reply prompt" {
+		t.Fatalf("reply audit call = %+v", calls[0])
 	}
 }
 
@@ -1374,18 +1231,15 @@ func TestGenerateAndSendLikeReplyAuditErrorDoesNotStopFlow(t *testing.T) {
 	defer cancel()
 
 	summarizer := &scriptedSummarizer{
-		responses:    []string{"INTJ", "generated"},
-		cancelOnCall: 2,
+		responses:    []string{`{"action":"send","reason":"fit","message":"generated"}`},
+		cancelOnCall: 1,
 		cancel:       cancel,
 	}
 	audit := &stubReplyAuditLogger{err: errors.New("append failed")}
 
 	h := &Handler{
-		state: NewStateMachine(),
-		config: &standalone.Config{
-			DatingMBTIPrompt:    "mbti prompt",
-			DatingMBTIAllowlist: []string{"INTJ"},
-		},
+		state:       NewStateMachine(),
+		config:      &standalone.Config{},
 		client:      summarizer,
 		model:       "model",
 		prompt:      "reply prompt",
@@ -1404,30 +1258,24 @@ func TestGenerateAndSendLikeReplyAuditErrorDoesNotStopFlow(t *testing.T) {
 }
 
 func TestGenerateAndSendLikeUsesProfileLLMCacheForSinglePhoto(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := context.Background()
 
 	summarizer := &scriptedSummarizer{
-		responses:    []string{"INTJ", "cached opener"},
-		cancelOnCall: 2,
-		cancel:       cancel,
+		responses: []string{`{"action":"send","reason":"fit","message":"cached opener"}`},
 	}
 
 	h := &Handler{
-		state: NewStateMachine(),
-		config: &standalone.Config{
-			DatingMBTIPrompt:    "mbti prompt",
-			DatingMBTIAllowlist: []string{"INTJ"},
-		},
-		client:      summarizer,
-		model:       "model",
-		prompt:      "reply prompt",
-		temperature: 0.2,
+		state:         NewStateMachine(),
+		config:        &standalone.Config{},
+		client:        summarizer,
+		model:         "model",
+		prompt:        "reply prompt",
+		temperature:   0.2,
+		clickButtonFn: func(context.Context, string) error { return nil },
 	}
 
 	first := ProfileData{
 		ProfileText:      "  Alice   \n  bio  ",
-		PhotoPaths:       []string{"/tmp/photo-first.jpg"},
 		PhotoIdentifiers: []string{"100:200"},
 	}
 	if err := h.generateAndSendLike(ctx, first); err != nil {
@@ -1436,38 +1284,32 @@ func TestGenerateAndSendLikeUsesProfileLLMCacheForSinglePhoto(t *testing.T) {
 
 	second := ProfileData{
 		ProfileText:      "alice bio",
-		PhotoPaths:       []string{"/tmp/photo-second.jpg"},
 		PhotoIdentifiers: []string{"100:200"},
 	}
 	if err := h.generateAndSendLike(ctx, second); err != nil {
 		t.Fatalf("generateAndSendLike(second) error = %v, want nil", err)
 	}
 
-	if got := summarizer.snapshotCallCount(); got != 2 {
-		t.Fatalf("SummarizeMultimodal calls = %d, want 2 (single MBTI+opener pass, cached second pass)", got)
+	if got := summarizer.snapshotCallCount(); got != 1 {
+		t.Fatalf("DecideMultimodal calls = %d, want 1", got)
 	}
 }
 
 func TestGenerateAndSendLikeUsesProfileLLMCacheForAlbumWithStablePhotoOrdering(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := context.Background()
 
 	summarizer := &scriptedSummarizer{
-		responses:    []string{"INTJ", "album opener"},
-		cancelOnCall: 2,
-		cancel:       cancel,
+		responses: []string{`{"action":"send","reason":"fit","message":"album opener"}`},
 	}
 
 	h := &Handler{
-		state: NewStateMachine(),
-		config: &standalone.Config{
-			DatingMBTIPrompt:    "mbti prompt",
-			DatingMBTIAllowlist: []string{"INTJ"},
-		},
-		client:      summarizer,
-		model:       "model",
-		prompt:      "reply prompt",
-		temperature: 0.2,
+		state:         NewStateMachine(),
+		config:        &standalone.Config{},
+		client:        summarizer,
+		model:         "model",
+		prompt:        "reply prompt",
+		temperature:   0.2,
+		clickButtonFn: func(context.Context, string) error { return nil },
 	}
 
 	albumOne := &telegram.Album{Messages: []*telegram.NewMessage{
@@ -1508,15 +1350,15 @@ func TestGenerateAndSendLikeUsesProfileLLMCacheForAlbumWithStablePhotoOrdering(t
 		t.Fatalf("buildProfileLLMCacheKey() mismatch for equivalent albums: %q != %q", firstKey, secondKey)
 	}
 
-	if err := h.generateAndSendLike(ctx, ProfileData{ProfileText: "Album profile", PhotoPaths: []string{"/tmp/a.jpg"}, PhotoIdentifiers: firstIDs}); err != nil {
+	if err := h.generateAndSendLike(ctx, ProfileData{ProfileText: "Album profile", PhotoIdentifiers: firstIDs}); err != nil {
 		t.Fatalf("generateAndSendLike(first album) error = %v, want nil", err)
 	}
-	if err := h.generateAndSendLike(ctx, ProfileData{ProfileText: "  album   profile ", PhotoPaths: []string{"/tmp/b.jpg"}, PhotoIdentifiers: secondIDs}); err != nil {
+	if err := h.generateAndSendLike(ctx, ProfileData{ProfileText: "  album   profile ", PhotoIdentifiers: secondIDs}); err != nil {
 		t.Fatalf("generateAndSendLike(second album) error = %v, want nil", err)
 	}
 
-	if got := summarizer.snapshotCallCount(); got != 2 {
-		t.Fatalf("SummarizeMultimodal calls = %d, want 2 (single MBTI+opener pass, cached second pass)", got)
+	if got := summarizer.snapshotCallCount(); got != 1 {
+		t.Fatalf("DecideMultimodal calls = %d, want 1", got)
 	}
 }
 
@@ -1526,12 +1368,9 @@ func TestGenerateAndSendLikeDuplicateSkipsBeforeLLM(t *testing.T) {
 	clicked := ""
 
 	h := &Handler{
-		state: NewStateMachine(),
-		config: &standalone.Config{
-			DatingMBTIPrompt:    "mbti prompt",
-			DatingMBTIAllowlist: []string{"INTJ"},
-		},
-		client:        &scriptedSummarizer{responses: []string{"INTJ", "generated"}},
+		state:         NewStateMachine(),
+		config:        &standalone.Config{},
+		client:        &scriptedSummarizer{responses: []string{`{"action":"send","reason":"fit","message":"generated"}`}},
 		profileDedupe: dedupe,
 		clickButtonFn: func(_ context.Context, button string) error {
 			clicked = button
@@ -1557,7 +1396,7 @@ func TestGenerateAndSendLikeDuplicateSkipsBeforeLLM(t *testing.T) {
 
 	summarizer := h.client.(*scriptedSummarizer)
 	if got := summarizer.snapshotCallCount(); got != 0 {
-		t.Fatalf("SummarizeMultimodal calls = %d, want 0 on duplicate", got)
+		t.Fatalf("DecideMultimodal calls = %d, want 0 on duplicate", got)
 	}
 }
 
@@ -1567,13 +1406,10 @@ func TestGenerateAndSendLikeMarkProcessedBestEffortOnLikePath(t *testing.T) {
 	clicked := ""
 
 	h := &Handler{
-		state: NewStateMachine(),
-		config: &standalone.Config{
-			DatingMBTIPrompt:    "mbti prompt",
-			DatingMBTIAllowlist: []string{"INTJ"},
-		},
+		state:  NewStateMachine(),
+		config: &standalone.Config{},
 		client: &scriptedSummarizer{
-			responses: []string{"INTJ", "generated"},
+			responses: []string{`{"action":"send","reason":"fit","message":"generated"}`},
 		},
 		model:         "model",
 		prompt:        "prompt",
@@ -1597,26 +1433,23 @@ func TestGenerateAndSendLikeMarkProcessedBestEffortOnLikePath(t *testing.T) {
 	}
 }
 
-func TestProcessProfileLowQualityMarksProcessedAfterDislike(t *testing.T) {
+func TestShortBioDecisionSkipMarksProcessedAfterDislike(t *testing.T) {
 	ctx := context.Background()
 	dedupe := &stubProfileDedupeStore{}
 	clicked := ""
 
 	h := &Handler{
-		state: NewStateMachine(),
-		config: &standalone.Config{
-			DatingSkipLowQuality: true,
-			DatingMinBioLength:   100,
-		},
+		state:         NewStateMachine(),
+		config:        &standalone.Config{},
 		profileDedupe: dedupe,
+		client:        &scriptedSummarizer{responses: []string{`{"action":"skip","reason":"no hook","message":""}`}},
 		clickButtonFn: func(_ context.Context, button string) error {
 			clicked = button
 			return nil
 		},
 	}
 
-	msg := &telegram.NewMessage{Message: &telegram.MessageObj{Message: "Name - short bio"}}
-	if err := h.processProfile(ctx, msg); err != nil {
+	if err := h.generateAndSendLike(ctx, ProfileData{ProfileText: "Name - short bio"}); err != nil {
 		t.Fatalf("processProfile() error = %v, want nil", err)
 	}
 
@@ -1633,7 +1466,7 @@ func TestRetryGenerateMessageAppendsReplyAudit(t *testing.T) {
 	defer cancel()
 
 	summarizer := &scriptedSummarizer{
-		responses:    []string{"retry generated"},
+		responses:    []string{`{"action":"send","reason":"fit","message":"retry generated"}`},
 		cancelOnCall: 1,
 		cancel:       cancel,
 	}
@@ -1647,9 +1480,9 @@ func TestRetryGenerateMessageAppendsReplyAudit(t *testing.T) {
 		replyAudit:  audit,
 	}
 	h.state.SetPendingMessage("draft")
-	h.state.SetProfileData(&ProfileData{ProfileText: "bio", MBTI: "INFJ"})
+	h.state.SetProfileData(&ProfileData{ProfileText: "bio", Prompt: "original criteria"})
 
-	err := h.retryGenerateMessage(ctx, RetryTooShort)
+	err := h.retryGenerateMessage(ctx, PatternTooShort)
 	if err != nil {
 		t.Fatalf("retryGenerateMessage() error = %v, want nil", err)
 	}
@@ -1659,8 +1492,8 @@ func TestRetryGenerateMessageAppendsReplyAudit(t *testing.T) {
 		t.Fatalf("reply audit call count = %d, want 1", len(calls))
 	}
 
-	if calls[0].mbti != "INFJ" || calls[0].profileText != "bio" || calls[0].prompt != TooShortRetryPrompt || calls[0].response != "retry generated" {
-		t.Fatalf("reply audit call = %+v, want mbti=%q profile_text=%q prompt=%q response=%q", calls[0], "INFJ", "bio", TooShortRetryPrompt, "retry generated")
+	if calls[0].decision.Message != "retry generated" || calls[0].profileText != "bio" || calls[0].prompt != "original criteria" || calls[0].model != "model" {
+		t.Fatalf("reply audit call = %+v", calls[0])
 	}
 }
 
@@ -2029,7 +1862,7 @@ func TestHandleDailyLimitTakesPrecedenceOverViewProfilesAndRecovery(t *testing.T
 	}
 }
 
-func TestFinalizeSendStateResetsConversationInvariant(t *testing.T) {
+func TestFinalizeSendStateRetainsContextForBotRejection(t *testing.T) {
 	h := &Handler{state: NewStateMachine()}
 	h.state.SetState(StateWaitingPrompt)
 	h.state.SetPendingMessage("draft")
@@ -2037,7 +1870,6 @@ func TestFinalizeSendStateResetsConversationInvariant(t *testing.T) {
 		ProfileText:      "bio",
 		PhotoPaths:       []string{"/tmp/photo.jpg"},
 		PhotoIdentifiers: []string{"123:456"},
-		MBTI:             "INTJ",
 	})
 	h.state.IncrementRetry()
 
@@ -2049,11 +1881,11 @@ func TestFinalizeSendStateResetsConversationInvariant(t *testing.T) {
 	}
 
 	captured := contexts[0]
-	if captured.ProfileText != "bio" || captured.OpenerText != "draft" || captured.MBTI != "INTJ" {
-		t.Fatalf("captured context = %+v, want bio/draft/INTJ", captured)
+	if captured.ProfileText != "bio" || captured.OpenerText != "draft" || captured.MBTI != "" {
+		t.Fatalf("captured context = %+v, want bio/draft without MBTI", captured)
 	}
 
-	wantFingerprint := buildProfileLLMCacheKey("bio\ndraft\nINTJ", []string{"123:456"})
+	wantFingerprint := buildProfileLLMCacheKey("bio\ndraft", []string{"123:456"})
 	if captured.Fingerprint != wantFingerprint {
 		t.Fatalf("captured fingerprint = %q, want %q", captured.Fingerprint, wantFingerprint)
 	}
@@ -2061,16 +1893,16 @@ func TestFinalizeSendStateResetsConversationInvariant(t *testing.T) {
 		t.Fatal("captured timestamp is zero, want non-zero")
 	}
 
-	if got := h.state.GetPendingMessage(); got != "" {
-		t.Fatalf("pending message = %q, want empty", got)
+	if got := h.state.GetPendingMessage(); got != "draft" {
+		t.Fatalf("pending message = %q, want draft", got)
 	}
 
-	if got := h.state.GetProfileData(); got != nil {
-		t.Fatalf("profile data = %#v, want nil", got)
+	if got := h.state.GetProfileData(); got == nil {
+		t.Fatal("retry profile data was cleared before bot acceptance")
 	}
 
-	if got := h.state.GetRetryCount(); got != 0 {
-		t.Fatalf("retry count = %d, want 0", got)
+	if got := h.state.GetRetryCount(); got != 1 {
+		t.Fatalf("retry count = %d, want 1", got)
 	}
 
 	if got := h.state.GetState(); got != StateViewingProfiles {
@@ -2115,20 +1947,20 @@ func TestSendPendingMessageCacheMissPreservesState(t *testing.T) {
 	}
 }
 
-func TestSendTruncatedMessageCacheMissPreservesState(t *testing.T) {
+func TestSendValidatedMessageCacheMissPreservesState(t *testing.T) {
 	h := &Handler{chatID: 123456789, state: NewStateMachine()}
 	h.state.SetState(StateWaitingPrompt)
 	h.state.SetPendingMessage("truncated")
 	h.state.SetProfileData(&ProfileData{ProfileText: "bio", PhotoPaths: []string{"/tmp/photo.jpg"}})
 	h.state.IncrementRetry()
 
-	err := h.sendTruncatedMessage(context.Background(), "truncated")
+	err := h.sendValidatedMessage(context.Background(), "truncated")
 	if err == nil {
-		t.Fatal("sendTruncatedMessage() error = nil, want non-nil")
+		t.Fatal("sendValidatedMessage() error = nil, want non-nil")
 	}
 
 	if !strings.Contains(err.Error(), "dating peer is not cached yet") {
-		t.Fatalf("sendTruncatedMessage() error = %v, want cache miss error", err)
+		t.Fatalf("sendValidatedMessage() error = %v, want cache miss error", err)
 	}
 
 	if got := h.state.GetPendingMessage(); got != "truncated" {
@@ -2183,7 +2015,7 @@ func TestSendPendingMessageSuccessfulSendFollowedByShutdownFinalizesState(t *tes
 	}
 }
 
-func TestSendTruncatedMessageSuccessfulSendFollowedByShutdownFinalizesState(t *testing.T) {
+func TestSendValidatedMessageSuccessfulSendFollowedByShutdownFinalizesState(t *testing.T) {
 	h := &Handler{chatID: 123456789, state: NewStateMachine()}
 	h.state.SetState(StateWaitingPrompt)
 	h.state.SetPendingMessage("truncated")
@@ -2196,9 +2028,9 @@ func TestSendTruncatedMessageSuccessfulSendFollowedByShutdownFinalizesState(t *t
 		return nil
 	}
 
-	err := h.sendTruncatedMessage(context.Background(), "truncated")
+	err := h.sendValidatedMessage(context.Background(), "truncated")
 	if err != nil {
-		t.Fatalf("sendTruncatedMessage() error = %v, want nil", err)
+		t.Fatalf("sendValidatedMessage() error = %v, want nil", err)
 	}
 
 	if got := h.state.GetPendingMessage(); got != "" {
@@ -2417,12 +2249,8 @@ func TestShutdownCancelsInFlightWorkerJobAndKeepsStoppedState(t *testing.T) {
 	}
 
 	h := &Handler{
-		state: NewStateMachine(),
-		config: &standalone.Config{
-			DatingMBTIPrompt:     "mbti",
-			DatingMBTIAllowlist:  []string{"INTJ"},
-			DatingSkipLowQuality: false,
-		},
+		state:       NewStateMachine(),
+		config:      &standalone.Config{},
 		client:      summarizer,
 		model:       "model",
 		prompt:      "prompt",
@@ -2760,12 +2588,8 @@ func TestHandleRetryMessageShutdownCancelsLifecycleAndPreventsPostStopSend(t *te
 			}
 
 			h := &Handler{
-				state: NewStateMachine(),
-				config: &standalone.Config{
-					DatingMBTIPrompt:     "mbti",
-					DatingMBTIAllowlist:  []string{"INTJ"},
-					DatingSkipLowQuality: false,
-				},
+				state:       NewStateMachine(),
+				config:      &standalone.Config{},
 				client:      summarizer,
 				model:       "model",
 				temperature: 0.3,
@@ -2798,8 +2622,8 @@ func TestHandleRetryMessageShutdownCancelsLifecycleAndPreventsPostStopSend(t *te
 				t.Fatalf("state after Shutdown() = %v, want %v", got, StateStopped)
 			}
 
-			if got := h.state.GetPendingMessage(); got != "draft" {
-				t.Fatalf("pending message after Shutdown() = %q, want unchanged %q", got, "draft")
+			if got := h.state.GetPendingMessage(); got != "" {
+				t.Fatalf("pending message after Shutdown() = %q, want empty", got)
 			}
 		})
 	}
@@ -2900,62 +2724,5 @@ func TestBootstrapWithActionsAllowsNilSearch(t *testing.T) {
 
 	if len(steps) != 1 || steps[0] != "start" {
 		t.Fatalf("steps = %v, want [start]", steps)
-	}
-}
-
-func TestExtractBioText(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{name: "empty", in: "", want: ""},
-		{name: "only spaces", in: "   ", want: ""},
-		{name: "profile with en dash", in: "Ксюша, 23, Нижний Новгород – Исключительно общение", want: "Исключительно общение"},
-		{name: "profile with hyphen", in: "Ксюша, 23, Нижний Новгород - Исключительно общение", want: "Исключительно общение"},
-		{name: "bio only", in: "Ищу серьезные отношения", want: "Ищу серьезные отношения"},
-		{name: "separator no bio", in: "Ксюша, 23, Нижний Новгород –   ", want: ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := extractBioText(tt.in); got != tt.want {
-				t.Fatalf("extractBioText() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestIsLowQualityUsesBioOnly(t *testing.T) {
-	h := &Handler{config: &standalone.Config{DatingSkipLowQuality: true, DatingMinBioLength: 50}}
-
-	shortBio := "Ксюша, 23, Нижний Новгород – Коротко о себе"
-	if !h.isLowQuality(shortBio) {
-		t.Fatalf("isLowQuality(%q) = false, want true", shortBio)
-	}
-
-	longBio := "Ксюша, 23, Нижний Новгород – " + strings.Repeat("а", 60)
-	if h.isLowQuality(longBio) {
-		t.Fatalf("isLowQuality(%q) = true, want false", longBio)
-	}
-}
-
-func TestIsLowQualityEmptyTextWhenEnabled(t *testing.T) {
-	h := &Handler{config: &standalone.Config{DatingSkipLowQuality: true, DatingMinBioLength: 50}}
-
-	if !h.isLowQuality("") {
-		t.Fatal("isLowQuality(\"\") = false, want true")
-	}
-}
-
-func TestIsLowQualityDisabled(t *testing.T) {
-	h := &Handler{config: &standalone.Config{DatingSkipLowQuality: false, DatingMinBioLength: 50}}
-
-	if h.isLowQuality("") {
-		t.Fatal("isLowQuality disabled should return false for empty text")
-	}
-
-	if h.isLowQuality("коротко") {
-		t.Fatal("isLowQuality disabled should return false for short text")
 	}
 }

@@ -29,18 +29,14 @@ func TestNewStandaloneHandler_Wiring(t *testing.T) {
 	}))
 	defer server.Close()
 	cfg := &standalone.Config{
-		LLMAPIKey:            "configured-key",
-		LLMBaseURL:           server.URL + "/v1",
-		OpenRouterAPIKey:     "test-api-key",
-		DatingBotChatID:      123456789,
-		DatingModel:          "test-model",
-		DatingPrompt:         "test prompt",
-		DatingMBTIPrompt:     "test mbti prompt",
-		DatingMBTIAllowlist:  []string{"INTJ", "ENFP"},
-		DatingActionDelay:    1000,
-		DatingTemperature:    0.8,
-		DatingSkipLowQuality: true,
-		DatingMinBioLength:   75,
+		LLMAPIKey:         "configured-key",
+		LLMBaseURL:        server.URL + "/v1",
+		OpenRouterAPIKey:  "test-api-key",
+		DatingBotChatID:   123456789,
+		DatingModel:       "test-model",
+		DatingPrompt:      "test prompt",
+		DatingActionDelay: 1000,
+		DatingTemperature: 0.8,
 	}
 
 	// Nil client is acceptable for wiring verification - the handler stores
@@ -52,7 +48,7 @@ func TestNewStandaloneHandler_Wiring(t *testing.T) {
 	if handler == nil {
 		t.Fatal("NewStandaloneHandler returned nil")
 	}
-	text, err := handler.client.SummarizeMultimodal(context.Background(), handler.model, "system", llm.MultimodalContent{Text: "bio"}, 0.7)
+	text, err := handler.client.DecideMultimodal(context.Background(), handler.model, "system", llm.MultimodalContent{Text: "bio"}, 0.7)
 	if err != nil || text != "ok" {
 		t.Fatalf("configured LLM call: text=%q error=%v", text, err)
 	}
@@ -94,10 +90,9 @@ func TestNewStandaloneHandler_Wiring(t *testing.T) {
 // state machine is properly initialized during bootstrap.
 func TestNewStandaloneHandler_StateInitialized(t *testing.T) {
 	cfg := &standalone.Config{
-		OpenRouterAPIKey:    "test-key",
-		DatingBotChatID:     123456789,
-		DatingModel:         "test-model",
-		DatingMBTIAllowlist: []string{"INTJ"},
+		OpenRouterAPIKey: "test-key",
+		DatingBotChatID:  123456789,
+		DatingModel:      "test-model",
 	}
 
 	handler := NewStandaloneHandler(cfg, nil)
@@ -133,10 +128,9 @@ func TestNewStandaloneHandler_Filter(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &standalone.Config{
-				OpenRouterAPIKey:    "test-key",
-				DatingBotChatID:     123456789,
-				DatingModel:         "test-model",
-				DatingMBTIAllowlist: []string{"INTJ"},
+				OpenRouterAPIKey: "test-key",
+				DatingBotChatID:  123456789,
+				DatingModel:      "test-model",
 			}
 
 			handler := NewStandaloneHandler(cfg, nil)
@@ -162,7 +156,6 @@ func TestNewStandaloneHandler_WebhookDisabledKeepsNoopDelivery(t *testing.T) {
 		OpenRouterAPIKey:      "test-key",
 		DatingBotChatID:       123456789,
 		DatingModel:           "test-model",
-		DatingMBTIAllowlist:   []string{"INTJ"},
 		DatingMatchWebhookURL: "",
 	}
 
@@ -201,7 +194,6 @@ func TestNewStandaloneHandler_WebhookEnabledDeliversPayload(t *testing.T) {
 		OpenRouterAPIKey:        "test-key",
 		DatingBotChatID:         123456789,
 		DatingModel:             "test-model",
-		DatingMBTIAllowlist:     []string{"INTJ"},
 		DatingMatchWebhookURL:   server.URL,
 		DatingMatchWebhookToken: "token",
 	}
@@ -235,7 +227,6 @@ func TestNewStandaloneHandler_WiresProfileDedupeWhenR2Enabled(t *testing.T) {
 		OpenRouterAPIKey:        "test-key",
 		DatingBotChatID:         123456789,
 		DatingModel:             "test-model",
-		DatingMBTIAllowlist:     []string{"INTJ"},
 		DatingProfileDedupTTL:   6 * time.Hour,
 		DatingR2Enabled:         true,
 		DatingR2Bucket:          "profiles",
@@ -265,7 +256,6 @@ func TestNewStandaloneHandler_WiresR2ReplyAuditUsingSharedStore(t *testing.T) {
 		OpenRouterAPIKey:        "test-key",
 		DatingBotChatID:         123456789,
 		DatingModel:             "test-model",
-		DatingMBTIAllowlist:     []string{"INTJ"},
 		DatingReplyAuditLogPath: filepath.Join(t.TempDir(), "replies.jsonl"),
 		DatingProfileDedupTTL:   6 * time.Hour,
 		DatingR2Enabled:         true,

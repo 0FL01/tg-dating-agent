@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0FL01/tg-dating-agent/internal/llm"
 	"github.com/amarnathcjd/gogram/telegram"
 )
 
@@ -37,7 +38,9 @@ type ProfileData struct {
 	PhotoPaths       []string
 	PhotoIdentifiers []string
 	ProfileText      string
-	MBTI             string
+	Content          llm.MultimodalContent
+	Prompt           string
+	Decision         llm.Decision
 }
 
 // ProfileJob represents a job to process a profile from the queue
@@ -70,7 +73,7 @@ type StateMachine struct {
 	startupOwnProfileSkip startupOwnProfileSkipContext
 	latestProfileJobID    int32
 	lastProcessedJobID    int32
-	profileLLMCache       map[string]profileLLMCacheEntry
+	profileLLMCache       map[string]llm.Decision
 	profileLLMCacheOrder  []string
 	profileLLMCacheMax    int
 	reciprocalLikeContext []RecentReciprocalLikeContext
@@ -107,11 +110,6 @@ type RecentVisibleProfileMediaSource struct {
 	AlbumMessages []*telegram.NewMessage
 }
 
-type profileLLMCacheEntry struct {
-	mbti   string
-	opener string
-}
-
 type ownProfileSkipContext struct {
 	markerMessageID int32
 	setAt           time.Time
@@ -144,7 +142,7 @@ func NewStateMachine() *StateMachine {
 			"stuck_recovery": false,
 		},
 		groupedCaptions:    make(map[int64]groupedCaptionContext),
-		profileLLMCache:    make(map[string]profileLLMCacheEntry),
+		profileLLMCache:    make(map[string]llm.Decision),
 		profileLLMCacheMax: defaultProfileLLMCacheMaxEntries,
 		reciprocalLikeMax:  defaultReciprocalLikeContextMaxEntries,
 	}
@@ -223,9 +221,9 @@ func (sm *StateMachine) pruneReciprocalLikeContextLocked(now time.Time) {
 	sm.reciprocalLikeContext = pruned
 }
 
-func (sm *StateMachine) GetProfileLLMCache(key string) (mbti string, opener string, ok bool) {
+func (sm *StateMachine) GetProfileLLMCache(key string) (llm.Decision, bool) {
 	if key == "" {
-		return "", "", false
+		return llm.Decision{}, false
 	}
 
 	sm.mu.RLock()
@@ -233,14 +231,14 @@ func (sm *StateMachine) GetProfileLLMCache(key string) (mbti string, opener stri
 
 	entry, ok := sm.profileLLMCache[key]
 	if !ok {
-		return "", "", false
+		return llm.Decision{}, false
 	}
 
-	return entry.mbti, entry.opener, true
+	return entry, true
 }
 
-func (sm *StateMachine) SetProfileLLMCache(key, mbti, opener string) {
-	if key == "" {
+func (sm *StateMachine) SetProfileLLMCache(key string, decision llm.Decision) {
+	if key == "" || decision.Validate() != nil {
 		return
 	}
 
@@ -251,7 +249,7 @@ func (sm *StateMachine) SetProfileLLMCache(key, mbti, opener string) {
 		sm.profileLLMCacheOrder = append(sm.profileLLMCacheOrder, key)
 	}
 
-	sm.profileLLMCache[key] = profileLLMCacheEntry{mbti: mbti, opener: opener}
+	sm.profileLLMCache[key] = decision
 
 	if len(sm.profileLLMCache) <= sm.profileLLMCacheMax {
 		return
@@ -316,6 +314,9 @@ func (sm *StateMachine) GetPendingMessage() string {
 func (sm *StateMachine) SetPendingMessage(msg string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	if sm.state == StateStopped {
+		return
+	}
 	sm.pendingMessage = msg
 }
 
@@ -400,6 +401,9 @@ func (sm *StateMachine) BeginShutdown() {
 
 	sm.state = StateStopped
 	sm.acceptingWork = false
+	sm.profileData = nil
+	sm.pendingMessage = ""
+	sm.retryCount = 0
 	sm.ownProfileSkip = ownProfileSkipContext{}
 	sm.groupedCaptions = make(map[int64]groupedCaptionContext)
 	sm.startupOwnProfileSkip = startupOwnProfileSkipContext{}
@@ -617,13 +621,25 @@ func (sm *StateMachine) ResetRetry() {
 func (sm *StateMachine) SetProfileData(data *ProfileData) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	sm.profileData = data
+	if sm.state == StateStopped {
+		return
+	}
+	if data == nil {
+		sm.profileData = nil
+		return
+	}
+	copy := *data
+	sm.profileData = &copy
 }
 
 func (sm *StateMachine) GetProfileData() *ProfileData {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	return sm.profileData
+	if sm.profileData == nil {
+		return nil
+	}
+	copy := *sm.profileData
+	return &copy
 }
 
 func (sm *StateMachine) ClearProfileData() {
@@ -637,10 +653,15 @@ func (sm *StateMachine) FinalizeSendState(expectedCurrent State) bool {
 	defer sm.mu.Unlock()
 
 	sm.captureRecentReciprocalLikeContextLocked(time.Now())
+	if sm.state == StateIdle || sm.state == StateStopped {
+		sm.pendingMessage = ""
+		sm.profileData = nil
+		sm.retryCount = 0
+		return false
+	}
 
-	sm.pendingMessage = ""
-	sm.profileData = nil
-	sm.retryCount = 0
+	// API delivery is not bot acceptance. Retain immutable retry context until
+	// the next profile or explicit reset confirms completion.
 
 	if sm.state == expectedCurrent {
 		sm.state = StateViewingProfiles
@@ -662,11 +683,10 @@ func (sm *StateMachine) captureRecentReciprocalLikeContextLocked(now time.Time) 
 	entry := RecentReciprocalLikeContext{
 		ProfileText: sm.profileData.ProfileText,
 		OpenerText:  sm.pendingMessage,
-		MBTI:        sm.profileData.MBTI,
 		CapturedAt:  now,
 	}
 
-	fingerprintSource := sm.profileData.ProfileText + "\n" + sm.pendingMessage + "\n" + sm.profileData.MBTI
+	fingerprintSource := sm.profileData.ProfileText + "\n" + sm.pendingMessage
 	entry.Fingerprint = buildProfileLLMCacheKey(fingerprintSource, sm.profileData.PhotoIdentifiers)
 
 	sm.pruneReciprocalLikeContextLocked(now)

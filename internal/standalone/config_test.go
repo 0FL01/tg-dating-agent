@@ -1,7 +1,6 @@
 package standalone
 
 import (
-	"reflect"
 	"testing"
 	"time"
 )
@@ -163,6 +162,11 @@ func TestLoadDefaultSessionPath(t *testing.T) {
 
 func TestLoadDatingDefaults(t *testing.T) {
 	setRequiredEnv(t)
+	// Removed runtime gates must not affect the decision prompt or config.
+	t.Setenv("DATING_MBTI_PROMPT", "obsolete")
+	t.Setenv("DATING_MBTI_ALLOWLIST", "INTJ")
+	t.Setenv("DATING_SKIP_LOW_QUALITY", "true")
+	t.Setenv("DATING_MIN_BIO_LENGTH", "99999")
 
 	cfg, err := Load()
 	if err != nil {
@@ -178,17 +182,11 @@ func TestLoadDatingDefaults(t *testing.T) {
 	if cfg.DatingPrompt != DefaultDatingPrompt {
 		t.Errorf("DatingPrompt doesn't match default")
 	}
-	if cfg.DatingMBTIPrompt != DefaultDatingMBTIPrompt {
-		t.Errorf("DatingMBTIPrompt doesn't match default")
-	}
 	if cfg.DatingActionDelay != DefaultDatingActionDelay {
 		t.Errorf("DatingActionDelay = %v, want %v", cfg.DatingActionDelay, DefaultDatingActionDelay)
 	}
 	if cfg.DatingTemperature != DefaultDatingTemperature {
 		t.Errorf("DatingTemperature = %f, want %f", cfg.DatingTemperature, DefaultDatingTemperature)
-	}
-	if cfg.DatingMinBioLength != DefaultDatingMinBioLength {
-		t.Errorf("DatingMinBioLength = %d, want %d", cfg.DatingMinBioLength, DefaultDatingMinBioLength)
 	}
 	if cfg.DatingReplyAuditLogPath != DefaultDatingReplyAuditLogPath {
 		t.Errorf("DatingReplyAuditLogPath = %q, want %q", cfg.DatingReplyAuditLogPath, DefaultDatingReplyAuditLogPath)
@@ -226,12 +224,6 @@ func TestLoadDatingDefaults(t *testing.T) {
 	if cfg.DatingR2SecretAccessKey != "" {
 		t.Errorf("DatingR2SecretAccessKey = %q, want empty", cfg.DatingR2SecretAccessKey)
 	}
-	if cfg.DatingSkipLowQuality != false {
-		t.Errorf("DatingSkipLowQuality = %v, want false", cfg.DatingSkipLowQuality)
-	}
-	if !reflect.DeepEqual(cfg.DatingMBTIAllowlist, defaultDatingMBTIAllowlist) {
-		t.Errorf("DatingMBTIAllowlist = %v, want %v", cfg.DatingMBTIAllowlist, defaultDatingMBTIAllowlist)
-	}
 }
 
 func TestLoadDatingCustomValues(t *testing.T) {
@@ -239,12 +231,8 @@ func TestLoadDatingCustomValues(t *testing.T) {
 
 	t.Setenv("DATING_MODEL", "custom/model")
 	t.Setenv("DATING_PROMPT", "custom prompt")
-	t.Setenv("DATING_MBTI_PROMPT", "custom mbti prompt")
-	t.Setenv("DATING_MBTI_ALLOWLIST", "INTP,ENTP")
 	t.Setenv("DATING_ACTION_DELAY", "5s")
 	t.Setenv("DATING_TEMPERATURE", "0.9")
-	t.Setenv("DATING_SKIP_LOW_QUALITY", "true")
-	t.Setenv("DATING_MIN_BIO_LENGTH", "100")
 	t.Setenv("DATING_REPLY_AUDIT_LOG_PATH", "/tmp/replies-custom.jsonl")
 	t.Setenv("DATING_MATCH_WEBHOOK_URL", "https://example.com/hook")
 	t.Setenv("DATING_MATCH_WEBHOOK_TOKEN", "secret-token")
@@ -272,26 +260,12 @@ func TestLoadDatingCustomValues(t *testing.T) {
 	if cfg.DatingPrompt != "custom prompt" {
 		t.Errorf("DatingPrompt = %s, want 'custom prompt'", cfg.DatingPrompt)
 	}
-	if cfg.DatingMBTIPrompt != "custom mbti prompt" {
-		t.Errorf("DatingMBTIPrompt = %s, want 'custom mbti prompt'", cfg.DatingMBTIPrompt)
-	}
-
-	expectedAllowlist := []string{"INTP", "ENTP"}
-	if !reflect.DeepEqual(cfg.DatingMBTIAllowlist, expectedAllowlist) {
-		t.Errorf("DatingMBTIAllowlist = %v, want %v", cfg.DatingMBTIAllowlist, expectedAllowlist)
-	}
 
 	if cfg.DatingActionDelay != 5*time.Second {
 		t.Errorf("DatingActionDelay = %v, want 5s", cfg.DatingActionDelay)
 	}
 	if cfg.DatingTemperature != 0.9 {
 		t.Errorf("DatingTemperature = %f, want 0.9", cfg.DatingTemperature)
-	}
-	if cfg.DatingSkipLowQuality != true {
-		t.Errorf("DatingSkipLowQuality = %v, want true", cfg.DatingSkipLowQuality)
-	}
-	if cfg.DatingMinBioLength != 100 {
-		t.Errorf("DatingMinBioLength = %d, want 100", cfg.DatingMinBioLength)
 	}
 	if cfg.DatingReplyAuditLogPath != "/tmp/replies-custom.jsonl" {
 		t.Errorf("DatingReplyAuditLogPath = %q, want %q", cfg.DatingReplyAuditLogPath, "/tmp/replies-custom.jsonl")
@@ -419,39 +393,6 @@ func TestLoadDatingMatchWebhookTimeoutInvalidFallsBackToDefault(t *testing.T) {
 
 	if cfg.DatingMatchWebhookTimeout != DefaultDatingMatchWebhookTimeout {
 		t.Errorf("DatingMatchWebhookTimeout = %v, want %v", cfg.DatingMatchWebhookTimeout, DefaultDatingMatchWebhookTimeout)
-	}
-}
-
-func TestLoadDatingMBTIAllowlistNormalization(t *testing.T) {
-	setRequiredEnv(t)
-
-	// Test normalization of MBTI allowlist (lowercase -> uppercase, trimming)
-	t.Setenv("DATING_MBTI_ALLOWLIST", " intj, enfp , , IsFj ")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	expected := []string{"INTJ", "ENFP", "ISFJ"}
-	if !reflect.DeepEqual(cfg.DatingMBTIAllowlist, expected) {
-		t.Errorf("DatingMBTIAllowlist = %v, want %v", cfg.DatingMBTIAllowlist, expected)
-	}
-}
-
-func TestLoadDatingMBTIAllowlistFallbackOnEmpty(t *testing.T) {
-	setRequiredEnv(t)
-
-	// Test fallback to defaults when only whitespace/commas provided
-	t.Setenv("DATING_MBTI_ALLOWLIST", " ,   ,\t")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	if !reflect.DeepEqual(cfg.DatingMBTIAllowlist, defaultDatingMBTIAllowlist) {
-		t.Errorf("DatingMBTIAllowlist = %v, want default %v", cfg.DatingMBTIAllowlist, defaultDatingMBTIAllowlist)
 	}
 }
 
