@@ -11,6 +11,7 @@ const (
 	PatternLikedYouPrompt  = "liked you. have a look?"
 	PatternStartChatting   = "start chatting"
 	PatternWriteMessage    = "Write a message"
+	PatternSendMessage     = "Send this message to the user?"
 	PatternViewProfiles    = "View profiles"
 	PatternTooLong         = "message is too long"
 	PatternTooShort        = "message is too short"

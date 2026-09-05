@@ -208,7 +208,7 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 		return h.retryGenerateMessage(h.lifecycleContext(), text)
 	}
 
-	if strings.Contains(text, PatternWriteMessage) {
+	if strings.Contains(text, PatternWriteMessage) || text == PatternSendMessage {
 		return h.sendPendingMessage(m)
 	}
 

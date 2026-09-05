@@ -1910,6 +1910,44 @@ func TestFinalizeSendStateRetainsContextForBotRejection(t *testing.T) {
 	}
 }
 
+func TestHandleMessageEntryPromptSendsPendingTextOnce(t *testing.T) {
+	for _, prompt := range []string{"Write a message", "Send this message to the user?"} {
+		t.Run(prompt, func(t *testing.T) {
+			h := &Handler{chatID: 123456789, state: NewStateMachine()}
+			h.state.SetState(StateWaitingPrompt)
+			const pending = "What is your favorite hiking route?"
+			h.state.SetPendingMessage(pending)
+			h.setBotPeer(&telegram.InputPeerUser{UserID: h.chatID, AccessHash: 1})
+			var sent []string
+			h.sendMessageFn = func(_ context.Context, _ telegram.InputPeer, text string) error {
+				sent = append(sent, text)
+				return nil
+			}
+			msg := &telegram.NewMessage{Message: &telegram.MessageObj{
+				Message: prompt,
+				ReplyMarkup: &telegram.ReplyKeyboardMarkup{Rows: []*telegram.KeyboardButtonRow{{
+					Buttons: []telegram.KeyboardButton{
+						&telegram.KeyboardButtonObj{Text: "💌"},
+						&telegram.KeyboardButtonObj{Text: "✖"},
+					},
+				}}},
+			}}
+
+			for i := 0; i < 2; i++ {
+				if err := h.Handle(msg); err != nil {
+					t.Fatalf("Handle() error = %v", err)
+				}
+			}
+			if len(sent) != 1 || sent[0] != pending {
+				t.Fatalf("sent = %q, want only pending text %q", sent, pending)
+			}
+			if got := h.state.GetState(); got != StateViewingProfiles {
+				t.Fatalf("state = %v, want %v", got, StateViewingProfiles)
+			}
+		})
+	}
+}
+
 func TestSendPendingMessageCacheMissPreservesState(t *testing.T) {
 	h := &Handler{chatID: 123456789, state: NewStateMachine()}
 	h.state.SetState(StateWaitingPrompt)
