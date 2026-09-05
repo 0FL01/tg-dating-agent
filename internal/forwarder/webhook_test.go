@@ -168,7 +168,7 @@ func TestWebhookHandlerFormattingAndForwarding(t *testing.T) {
 		t.Fatalf("NewWebhookHandler() error = %v", err)
 	}
 
-	body := `{"event_type":"reciprocal_like_final","raw_contact_url":"https://t.me/test_user?text=hi","contact_username":"test_user","profile_text":"Profile bio","opener_text":"Hello there","mbti":"INTJ"}`
+	body := `{"event_type":"reciprocal_like_final","raw_contact_url":"https://t.me/test_user?text=hi","contact_username":"test_user","profile_text":"Profile bio","opener_text":"Hello there"}`
 	req := httptest.NewRequest(http.MethodPost, cfg.WebhookPath, strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer token-123")
 	req.Header.Set("Content-Type", "application/json")
@@ -199,9 +199,6 @@ func TestWebhookHandlerFormattingAndForwarding(t *testing.T) {
 	if !strings.Contains(msg, "Opener: Hello there") {
 		t.Fatalf("message = %q, want opener line", msg)
 	}
-	if !strings.Contains(msg, "MBTI: INTJ") {
-		t.Fatalf("message = %q, want mbti line", msg)
-	}
 }
 
 func TestWebhookHandlerAcceptsDatingAgentPayloadSchema(t *testing.T) {
@@ -212,7 +209,7 @@ func TestWebhookHandlerAcceptsDatingAgentPayloadSchema(t *testing.T) {
 		t.Fatalf("NewWebhookHandler() error = %v", err)
 	}
 
-	body := `{"event_type":"reciprocal_like_final","raw_contact_url":"https://t.me/test_user?text=hello","contact_username":"test_user","deeplink_text":"hello","profile_text":"Profile bio","opener_text":"Hi","mbti":"INFJ","context_captured_at":"2026-03-10T12:30:00Z","event_timestamp":"2026-03-10T12:30:45Z"}`
+	body := `{"event_type":"reciprocal_like_final","raw_contact_url":"https://t.me/test_user?text=hello","contact_username":"test_user","deeplink_text":"hello","profile_text":"Profile bio","opener_text":"Hi","context_captured_at":"2026-03-10T12:30:00Z","event_timestamp":"2026-03-10T12:30:45Z"}`
 	req := httptest.NewRequest(http.MethodPost, cfg.WebhookPath, strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer token-123")
 	req.Header.Set("Content-Type", "application/json")

@@ -13,6 +13,24 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("OPENROUTER_API_KEY", "testkey")
 	t.Setenv("LLM_API_KEY", "")
 	t.Setenv("LLM_BASE_URL", "")
+	t.Setenv("LLM_API_MODE", "")
+}
+
+func TestLoadLLMAPIMode(t *testing.T) {
+	for _, mode := range []string{"", "auto", "chat_completions", "responses", "anthropic", "invalid"} {
+		t.Run(mode, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("LLM_API_MODE", mode)
+			cfg, err := Load()
+			if mode == "invalid" {
+				if err == nil {
+					t.Fatal("invalid mode accepted")
+				}
+			} else if err != nil || cfg.LLMAPIMode != mode {
+				t.Fatalf("mode not loaded: %v", err)
+			}
+		})
+	}
 }
 
 func TestLoadLLMEndpoint(t *testing.T) {
@@ -163,8 +181,6 @@ func TestLoadDefaultSessionPath(t *testing.T) {
 func TestLoadDatingDefaults(t *testing.T) {
 	setRequiredEnv(t)
 	// Removed runtime gates must not affect the decision prompt or config.
-	t.Setenv("DATING_MBTI_PROMPT", "obsolete")
-	t.Setenv("DATING_MBTI_ALLOWLIST", "INTJ")
 	t.Setenv("DATING_SKIP_LOW_QUALITY", "true")
 	t.Setenv("DATING_MIN_BIO_LENGTH", "99999")
 

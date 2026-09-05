@@ -93,7 +93,6 @@ const visibleProfileCardTTL = 30 * time.Minute
 type RecentReciprocalLikeContext struct {
 	ProfileText string
 	OpenerText  string
-	MBTI        string
 	Fingerprint string
 	CapturedAt  time.Time
 }

@@ -31,7 +31,7 @@ func TestParseDecision(t *testing.T) {
 		{"missing message", `{"action":"skip","reason":"no"}`, false},
 		{"null field", `{"action":"skip","reason":null,"message":""}`, false},
 		{"wrong type", `{"action":"skip","reason":42,"message":""}`, false},
-		{"extra field", `{"action":"skip","reason":"","message":"","mbti":"INTJ"}`, false},
+		{"extra field", `{"action":"skip","reason":"","message":"","extra":"value"}`, false},
 		{"duplicate", `{"action":"send","action":"skip","reason":"","message":""}`, false},
 		{"trailing JSON", `{"action":"skip","reason":"","message":""} {}`, false},
 		{"markdown", "```json\n{\"action\":\"skip\",\"reason\":\"\",\"message\":\"\"}\n```", false},
@@ -94,5 +94,27 @@ func TestDecideMultimodalSchemaAndRetainedPhotos(t *testing.T) {
 		if _, err := ParseDecision(raw); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestChatDecisionRejectsIncompleteOutput(t *testing.T) {
+	for _, reason := range []openrouter.FinishReason{openrouter.FinishReasonLength, openrouter.FinishReasonContentFilter, openrouter.FinishReasonToolCalls} {
+		client := &Client{createChatCompletion: func(context.Context, openrouter.ChatCompletionRequest) (openrouter.ChatCompletionResponse, error) {
+			return openrouter.ChatCompletionResponse{Choices: []openrouter.ChatCompletionChoice{{FinishReason: reason, Message: openrouter.ChatCompletionMessage{Content: openrouter.Content{Text: finalDecision}}}}}, nil
+		}}
+		if _, err := client.DecideMultimodal(context.Background(), "m", "prompt", MultimodalContent{Text: "bio"}, .7); err == nil {
+			t.Fatalf("accepted incomplete output: %s", reason)
+		}
+	}
+}
+
+func TestChatDecisionSchemaErrorDoesNotFallback(t *testing.T) {
+	calls := 0
+	client := &Client{createChatCompletion: func(context.Context, openrouter.ChatCompletionRequest) (openrouter.ChatCompletionResponse, error) {
+		calls++
+		return openrouter.ChatCompletionResponse{}, &openrouter.APIError{HTTPStatusCode: 400, Message: "unsupported schema"}
+	}}
+	if _, err := client.DecideMultimodal(context.Background(), "m", "prompt", MultimodalContent{Text: "bio"}, .7); err == nil || calls != 1 {
+		t.Fatalf("schema error fell back: calls=%d error=%v", calls, err)
 	}
 }

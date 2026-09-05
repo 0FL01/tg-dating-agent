@@ -40,7 +40,6 @@ type ReciprocalLikeFinalPayload struct {
 	DeeplinkText      string    `json:"deeplink_text,omitempty"`
 	ProfileText       string    `json:"profile_text,omitempty"`
 	OpenerText        string    `json:"opener_text,omitempty"`
-	MBTI              string    `json:"mbti,omitempty"`
 	ContextCapturedAt time.Time `json:"context_captured_at,omitempty"`
 	EventTimestamp    time.Time `json:"event_timestamp,omitempty"`
 }
@@ -284,12 +283,6 @@ func formatForwardMessage(instance string, payload ReciprocalLikeFinalPayload) s
 	b.WriteString("\n")
 	b.WriteString("Opener: ")
 	b.WriteString(nonEmptyOrDash(payload.OpenerText))
-
-	if mbti := strings.TrimSpace(payload.MBTI); mbti != "" {
-		b.WriteString("\n")
-		b.WriteString("MBTI: ")
-		b.WriteString(mbti)
-	}
 
 	return b.String()
 }

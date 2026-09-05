@@ -397,14 +397,12 @@ func TestStateMachineRecentReciprocalLikeContextStoreAndGet(t *testing.T) {
 	sm.AddRecentReciprocalLikeContext(RecentReciprocalLikeContext{
 		ProfileText: "bio-1",
 		OpenerText:  "opener-1",
-		MBTI:        "INTJ",
 		Fingerprint: "fp-1",
 		CapturedAt:  now,
 	})
 	sm.AddRecentReciprocalLikeContext(RecentReciprocalLikeContext{
 		ProfileText: "bio-2",
 		OpenerText:  "opener-2",
-		MBTI:        "INFJ",
 		Fingerprint: "fp-2",
 		CapturedAt:  now.Add(time.Second),
 	})
@@ -413,8 +411,8 @@ func TestStateMachineRecentReciprocalLikeContextStoreAndGet(t *testing.T) {
 	if !ok {
 		t.Fatal("GetLatestReciprocalLikeContext() ok=false, want true")
 	}
-	if latest.ProfileText != "bio-2" || latest.OpenerText != "opener-2" || latest.MBTI != "INFJ" || latest.Fingerprint != "fp-2" {
-		t.Fatalf("latest reciprocal-like context = %+v, want bio-2/opener-2/INFJ/fp-2", latest)
+	if latest.ProfileText != "bio-2" || latest.OpenerText != "opener-2" || latest.Fingerprint != "fp-2" {
+		t.Fatalf("latest reciprocal-like context = %+v, want bio-2/opener-2/fp-2", latest)
 	}
 
 	list := sm.ListRecentReciprocalLikeContexts(now.Add(2*time.Second), -1)
@@ -485,7 +483,6 @@ func TestStateMachineRecentReciprocalLikeContextConcurrentAccess(t *testing.T) {
 				sm.AddRecentReciprocalLikeContext(RecentReciprocalLikeContext{
 					ProfileText: "profile",
 					OpenerText:  "opener",
-					MBTI:        "INTJ",
 					Fingerprint: "worker",
 					CapturedAt:  now.Add(time.Duration(workerID+j) * time.Millisecond),
 				})

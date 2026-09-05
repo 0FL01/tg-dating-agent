@@ -95,8 +95,8 @@ func TestReplyAuditLoggerAppendWritesValidJSONLine(t *testing.T) {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		t.Fatal(err)
 	}
-	if fields["mbti"] != nil || fields["response"] != nil {
-		t.Fatal("legacy MBTI/response fields emitted")
+	if fields["response"] != nil {
+		t.Fatal("legacy response field emitted")
 	}
 	if rec.ProfileText != "Alice - bio" {
 		t.Fatalf("profile_text = %q, want %q", rec.ProfileText, "Alice - bio")
@@ -144,7 +144,7 @@ func TestReplyAuditLoggerAppendAppendsMultipleEntries(t *testing.T) {
 		t.Fatalf("first line unmarshal error = %v", err)
 	}
 	if first.Action != "send" || first.ProfileText != "bio 1" || first.Prompt != "prompt 1" || first.Message != "response 1" {
-		t.Fatalf("first record = %+v, want mbti/profile_text/prompt/response for first append", first)
+		t.Fatalf("first record = %+v, want action/profile_text/prompt/message for first append", first)
 	}
 
 	var second replyAuditRecord
@@ -152,7 +152,7 @@ func TestReplyAuditLoggerAppendAppendsMultipleEntries(t *testing.T) {
 		t.Fatalf("second line unmarshal error = %v", err)
 	}
 	if second.Action != "skip" || second.Reason != "no hook" || second.Model != "model" || second.ProfileText != "bio 2" || second.Prompt != "prompt 2" || second.Message != "" {
-		t.Fatalf("second record = %+v, want mbti/profile_text/prompt/response for second append", second)
+		t.Fatalf("second record = %+v, want action/profile_text/prompt/message for second append", second)
 	}
 }
 
@@ -207,7 +207,7 @@ func TestReplyAuditLoggerAppendConcurrentWrites(t *testing.T) {
 			t.Fatalf("line %d unmarshal error = %v", idx, err)
 		}
 		if rec.Action != "send" || !strings.HasPrefix(rec.ProfileText, "bio ") || rec.Message != "response" {
-			t.Fatalf("line %d record = %+v, want mbti INTJ, profile_text with bio prefix, and response response", idx, rec)
+			t.Fatalf("line %d record = %+v, want send, profile_text with bio prefix, and message response", idx, rec)
 		}
 	}
 }

@@ -16,7 +16,7 @@
 - Автообработка анкет из `@leomatchbot`
 - Генерация первого сообщения через LLM
 - Анализ фото и текста по критериям `DATING_PROMPT`
-- Структурированное решение `send` / `skip` без обязательного MBTI-фильтра
+- Структурированное решение `send` / `skip` по вашему промпту
 - Кэширование результатов LLM для повторных анкет
 - Обработка альбомов с детерминированным привязыванием текста
 - Отправка уведомлений о взаимных лайках через вебхук
@@ -148,7 +148,7 @@ docker compose -f docker-compose.forwarder.yml up -d --build forwarder
 
 ### Dating Agent
 
-LLM использует единый Chat Completions API для всех сервисов:
+LLM поддерживает Chat Completions, Responses и Anthropic Messages:
 
 | Сервис | `LLM_BASE_URL` |
 |---|---|
@@ -158,9 +158,32 @@ LLM использует единый Chat Completions API для всех се�
 | OpenCode Go | `https://opencode.ai/zen/go/v1` |
 
 Задайте `LLM_API_KEY` от выбранного endpoint и `DATING_MODEL` с его API model ID
-(без CLI-префиксов `opencode/` и `opencode-go/`). Модель должна поддерживать
-Chat Completions и изображения; Responses и Anthropic Messages напрямую не поддерживаются.
-Base URL включает префикс API, но не `/chat/completions`.
+(для прямого OpenCode соответствующий CLI-префикс также допустим). Модель должна
+поддерживать изображения и structured output. Base URL включает префикс API,
+но не `/chat/completions`, `/responses` или `/messages`.
+
+Для прямых OpenCode Zen/Go при старте проверяется модель через `/models`, затем
+из `https://models.opencode.ai/api.json` выбирается протокол по `provider.npm`
+модели либо `npm` провайдера. Метаданные загружаются один раз с ограничениями
+времени и размера; API-ключ не отправляется публичному каталогу. Адрес inference
+остаётся заданным вами. Ошибка каталога/неизвестная модель/неподдерживаемые возможности
+останавливают запуск до обработки Telegram-анкет. Наличие модели в каталоге не
+заменяет live-проверку доступа аккаунта и реализации structured output провайдером.
+
+OpenRouter, OmniRoute и остальные совместимые endpoints по умолчанию используют
+Chat Completions и получают model ID без изменений. Для custom endpoint можно задать
+`LLM_API_MODE=responses` или `LLM_API_MODE=anthropic`; default — `auto`, также допустим
+`chat_completions`. Прямой OpenCode не допускает override, противоречащий каталогу.
+Перебора endpoint и автоматической смены модели при ошибках нет.
+
+Пример прямого Muse Spark через Go:
+```dotenv
+LLM_BASE_URL=https://opencode.ai/zen/go/v1
+LLM_API_KEY=your_key
+DATING_MODEL=muse-spark-1.3-contributor
+```
+Проверьте условия хранения данных и обучения для выбранной модели перед передачей
+реальных анкет и фотографий; Contributor не следует считать zero-data-retention.
 При явном `LLM_BASE_URL` legacy-ключ не подставляется, даже для OpenRouter.
 OmniRoute разворачивается отдельно; ключ gateway и upstream-маршруты настраиваются в нём.
 В текущем Linux Compose с host network локальный gateway доступен через `localhost`.
@@ -232,13 +255,12 @@ OmniRoute разворачивается отдельно; ключ gateway и u
 В Telegram уходит только `message`, не причина и не reasoning. Код требует одну строку,
 непустой текст для `send` и максимум 200 Unicode-символов. Стиль и содержательный
 отбор задаёт промпт; технический JSON-протокол задаётся отдельно системной инструкцией
-и `response_format: json_schema`. Невалидный ответ не отправляется. Автоматического
+и structured output выбранного API. Невалидный ответ не отправляется. Автоматического
 перехода к свободному тексту при неподдерживаемой схеме нет.
 
 **Миграция промпта:** замените «только сообщение либо SKIP» на описанный JSON-формат;
-правила длины, регистра и стиля относятся к `message`. Переменные `DATING_MBTI_PROMPT`,
-`DATING_MBTI_ALLOWLIST`, `DATING_SKIP_LOW_QUALITY`, `DATING_MIN_BIO_LENGTH` больше не
-управляют отбором. Нужные критерии перенесите в `DATING_PROMPT`.
+правила длины, регистра и стиля относятся к `message`. Все содержательные критерии
+отбора задавайте в `DATING_PROMPT`, а не отдельными фильтрами окружения.
 
 После исчерпания коррекций до входа в режим письма анкета пропускается. Если бот уже
 ждёт письмо, агент безопасно останавливает обработку: подтверждённого протокола
@@ -263,7 +285,6 @@ Persistent dedupe сохраняется: ранее обработанные а
    - `deeplink_text`: ссылка t.me/username
    - `profile_text`: текст анкеты
    - `opener_text`: первое сообщение
-   - `mbti`: необязательное legacy-поле; новые решения его не заполняют
 5. Отправка HTTP POST на `DATING_MATCH_WEBHOOK_URL` (multipart/form-data с фотографиями)
 6. Match Forwarder валидирует запрос и формирует сообщение
 7. Уведомление доставляется в `FORWARDER_TARGET_CHAT_ID` через Telegram Bot API

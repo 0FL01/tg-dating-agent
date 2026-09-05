@@ -157,7 +157,7 @@ func (s *blockingSummarizer) DecideMultimodal(ctx context.Context, _ string, _ s
 		})
 		return "", ctx.Err()
 	case <-s.release:
-		return "INTJ", nil
+		return `{"action":"skip","reason":"test","message":""}`, nil
 	}
 }
 
@@ -1881,8 +1881,8 @@ func TestFinalizeSendStateRetainsContextForBotRejection(t *testing.T) {
 	}
 
 	captured := contexts[0]
-	if captured.ProfileText != "bio" || captured.OpenerText != "draft" || captured.MBTI != "" {
-		t.Fatalf("captured context = %+v, want bio/draft without MBTI", captured)
+	if captured.ProfileText != "bio" || captured.OpenerText != "draft" {
+		t.Fatalf("captured context = %+v, want bio/draft", captured)
 	}
 
 	wantFingerprint := buildProfileLLMCacheKey("bio\ndraft", []string{"123:456"})
@@ -2366,7 +2366,6 @@ func TestHandleStartChattingAssemblesReciprocalFinalPayloadNonTerminal(t *testin
 	h.state.AddRecentReciprocalLikeContext(RecentReciprocalLikeContext{
 		ProfileText: "profile bio",
 		OpenerText:  "hello opener",
-		MBTI:        "INTJ",
 		CapturedAt:  contextCapturedAt,
 	})
 
@@ -2403,8 +2402,8 @@ func TestHandleStartChattingAssemblesReciprocalFinalPayloadNonTerminal(t *testin
 	if gotPayload.DeeplinkText != "Hi there" {
 		t.Fatalf("payload.DeeplinkText = %q, want %q", gotPayload.DeeplinkText, "Hi there")
 	}
-	if gotPayload.ProfileText != "profile bio" || gotPayload.OpenerText != "hello opener" || gotPayload.MBTI != "INTJ" {
-		t.Fatalf("payload context fields = [%q, %q, %q], want [profile bio, hello opener, INTJ]", gotPayload.ProfileText, gotPayload.OpenerText, gotPayload.MBTI)
+	if gotPayload.ProfileText != "profile bio" || gotPayload.OpenerText != "hello opener" {
+		t.Fatalf("payload context fields = [%q, %q], want [profile bio, hello opener]", gotPayload.ProfileText, gotPayload.OpenerText)
 	}
 	if !gotPayload.ContextCapturedAt.Equal(contextCapturedAt) {
 		t.Fatalf("payload.ContextCapturedAt = %v, want %v", gotPayload.ContextCapturedAt, contextCapturedAt)

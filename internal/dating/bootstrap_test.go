@@ -43,7 +43,7 @@ func TestNewStandaloneHandler_Wiring(t *testing.T) {
 	// the reference but doesn't make Telegram calls during initialization.
 	var tgClient *telegram.Client
 
-	handler := NewStandaloneHandler(cfg, tgClient)
+	handler := NewStandaloneHandler(cfg, tgClient, llm.NewClient(cfg.LLMAPIKey, cfg.LLMBaseURL))
 
 	if handler == nil {
 		t.Fatal("NewStandaloneHandler returned nil")
@@ -95,7 +95,7 @@ func TestNewStandaloneHandler_StateInitialized(t *testing.T) {
 		DatingModel:      "test-model",
 	}
 
-	handler := NewStandaloneHandler(cfg, nil)
+	handler := NewStandaloneHandler(cfg, nil, llm.NewClient("test-key", ""))
 
 	if handler.state == nil {
 		t.Fatal("handler.state was not initialized")
@@ -133,7 +133,7 @@ func TestNewStandaloneHandler_Filter(t *testing.T) {
 				DatingModel:      "test-model",
 			}
 
-			handler := NewStandaloneHandler(cfg, nil)
+			handler := NewStandaloneHandler(cfg, nil, llm.NewClient("test-key", ""))
 			filter := handler.Filter()
 
 			// Create a minimal mock message
@@ -159,7 +159,7 @@ func TestNewStandaloneHandler_WebhookDisabledKeepsNoopDelivery(t *testing.T) {
 		DatingMatchWebhookURL: "",
 	}
 
-	handler := NewStandaloneHandler(cfg, nil)
+	handler := NewStandaloneHandler(cfg, nil, llm.NewClient("test-key", ""))
 	if handler.deliverReciprocalLikeFinalFn != nil {
 		t.Fatal("deliverReciprocalLikeFinalFn should be nil when webhook URL is empty")
 	}
@@ -198,7 +198,7 @@ func TestNewStandaloneHandler_WebhookEnabledDeliversPayload(t *testing.T) {
 		DatingMatchWebhookToken: "token",
 	}
 
-	handler := NewStandaloneHandler(cfg, nil)
+	handler := NewStandaloneHandler(cfg, nil, llm.NewClient("test-key", ""))
 	if handler.deliverReciprocalLikeFinalFn == nil {
 		t.Fatal("deliverReciprocalLikeFinalFn should be wired when webhook URL is set")
 	}
@@ -237,7 +237,7 @@ func TestNewStandaloneHandler_WiresProfileDedupeWhenR2Enabled(t *testing.T) {
 		DatingInstanceName:      "instance-a",
 	}
 
-	handler := NewStandaloneHandler(cfg, nil)
+	handler := NewStandaloneHandler(cfg, nil, llm.NewClient("test-key", ""))
 	if handler.profileDedupe == nil {
 		t.Fatal("profileDedupe = nil, want initialized dedupe store")
 	}
@@ -267,7 +267,7 @@ func TestNewStandaloneHandler_WiresR2ReplyAuditUsingSharedStore(t *testing.T) {
 		DatingInstanceName:      "instance-a",
 	}
 
-	handler := NewStandaloneHandler(cfg, nil)
+	handler := NewStandaloneHandler(cfg, nil, llm.NewClient("test-key", ""))
 	if handler.replyAudit == nil {
 		t.Fatal("replyAudit = nil, want composed appender")
 	}

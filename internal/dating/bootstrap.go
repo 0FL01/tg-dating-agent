@@ -13,21 +13,8 @@ import (
 )
 
 // NewStandaloneHandler creates a fully initialized dating Handler using the
-// provided standalone configuration and Telegram client. It handles LLM client
-// initialization internally and returns a handler ready to process messages.
-//
-// Usage:
-//
-//	cfg, err := standalone.Load()
-//	if err != nil { ... }
-//	// ... create telegram client ...
-//	handler := dating.NewStandaloneHandler(cfg, tgClient)
-func NewStandaloneHandler(cfg *standalone.Config, tgClient *telegram.Client) *Handler {
-	apiKey := cfg.LLMAPIKey
-	if apiKey == "" && cfg.LLMBaseURL == "" {
-		apiKey = cfg.OpenRouterAPIKey
-	}
-	client := llm.NewClient(apiKey, cfg.LLMBaseURL)
+// provided configuration, Telegram client, and startup-resolved LLM client.
+func NewStandaloneHandler(cfg *standalone.Config, tgClient *telegram.Client, client llm.MultimodalDecider) *Handler {
 	handler := NewHandler(cfg, client, tgClient)
 
 	var r2Store *storage.R2ObjectStore

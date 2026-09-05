@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/signal"
@@ -8,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/0FL01/tg-dating-agent/internal/dating"
+	"github.com/0FL01/tg-dating-agent/internal/llm"
 	"github.com/0FL01/tg-dating-agent/internal/standalone"
 	"github.com/amarnathcjd/gogram/telegram"
 )
@@ -90,6 +92,11 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 	log.Printf("Configuration loaded (session source: %s)", cfg.SessionSource())
+	llmClient, model, err := llm.NewResolvedClient(context.Background(), cfg.LLMAPIKey, cfg.LLMBaseURL, cfg.DatingModel, cfg.LLMAPIMode)
+	if err != nil {
+		log.Fatalf("Failed to resolve LLM API: %v", err)
+	}
+	cfg.DatingModel = model
 
 	result, err := standalone.EnsureAuthorized(cfg)
 	if err != nil {
@@ -102,7 +109,7 @@ func main() {
 		log.Println("Authorized (user info unavailable)")
 	}
 
-	handler := dating.NewStandaloneHandler(cfg, result.Client)
+	handler := dating.NewStandaloneHandler(cfg, result.Client, llmClient)
 	handler.Start()
 	handler.StartWorker()
 

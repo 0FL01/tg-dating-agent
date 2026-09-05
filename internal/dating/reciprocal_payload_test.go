@@ -80,7 +80,6 @@ func TestBuildReciprocalLikeFinalPayloadWithContext(t *testing.T) {
 	ctx := RecentReciprocalLikeContext{
 		ProfileText: "bio",
 		OpenerText:  "opener",
-		MBTI:        "INTJ",
 		CapturedAt:  time.Unix(1710000050, 0),
 	}
 
@@ -101,8 +100,8 @@ func TestBuildReciprocalLikeFinalPayloadWithContext(t *testing.T) {
 	if payload.DeeplinkText != "Hello from bot" {
 		t.Fatalf("DeeplinkText = %q, want %q", payload.DeeplinkText, "Hello from bot")
 	}
-	if payload.ProfileText != "bio" || payload.OpenerText != "opener" || payload.MBTI != "INTJ" {
-		t.Fatalf("context fields = [%q, %q, %q], want [bio, opener, INTJ]", payload.ProfileText, payload.OpenerText, payload.MBTI)
+	if payload.ProfileText != "bio" || payload.OpenerText != "opener" {
+		t.Fatalf("context fields = [%q, %q], want [bio, opener]", payload.ProfileText, payload.OpenerText)
 	}
 	if !payload.ContextCapturedAt.Equal(ctx.CapturedAt) {
 		t.Fatalf("ContextCapturedAt = %v, want %v", payload.ContextCapturedAt, ctx.CapturedAt)
@@ -132,8 +131,8 @@ func TestBuildReciprocalLikeFinalPayloadWithoutContext(t *testing.T) {
 	if payload.DeeplinkText != "" {
 		t.Fatalf("DeeplinkText = %q, want empty", payload.DeeplinkText)
 	}
-	if payload.ProfileText != "" || payload.OpenerText != "" || payload.MBTI != "" {
-		t.Fatalf("context fields = [%q, %q, %q], want all empty", payload.ProfileText, payload.OpenerText, payload.MBTI)
+	if payload.ProfileText != "" || payload.OpenerText != "" {
+		t.Fatalf("context fields = [%q, %q], want all empty", payload.ProfileText, payload.OpenerText)
 	}
 	if !payload.ContextCapturedAt.IsZero() {
 		t.Fatalf("ContextCapturedAt = %v, want zero", payload.ContextCapturedAt)
@@ -150,7 +149,6 @@ func TestBuildReciprocalLikeFinalPayloadPrefersVisibleProfileAndDropsStaleOpener
 	h.state.AddRecentReciprocalLikeContext(RecentReciprocalLikeContext{
 		ProfileText: "Alice, 28 - Loves hiking",
 		OpenerText:  "Hi Alice!",
-		MBTI:        "INTJ",
 		CapturedAt:  now.Add(-2 * time.Minute),
 	})
 	h.state.RememberVisibleProfileCard("Bella, 27 - Coffee and books", 200, now.Add(-time.Minute))
@@ -167,9 +165,6 @@ func TestBuildReciprocalLikeFinalPayloadPrefersVisibleProfileAndDropsStaleOpener
 	}
 	if payload.OpenerText != "" {
 		t.Fatalf("OpenerText = %q, want empty", payload.OpenerText)
-	}
-	if payload.MBTI != "" {
-		t.Fatalf("MBTI = %q, want empty", payload.MBTI)
 	}
 	if !payload.ContextCapturedAt.IsZero() {
 		t.Fatalf("ContextCapturedAt = %v, want zero", payload.ContextCapturedAt)

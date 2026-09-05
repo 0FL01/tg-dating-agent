@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/0FL01/tg-dating-agent/internal/llm"
 )
 
 // Config holds all configuration needed for the standalone Dating Agent.
@@ -24,6 +26,7 @@ type Config struct {
 	// OpenAI-compatible API. OpenRouterAPIKey is retained for legacy callers.
 	LLMAPIKey        string
 	LLMBaseURL       string
+	LLMAPIMode       string
 	OpenRouterAPIKey string
 	OpenRouterModel  string // Model for LLM requests
 
@@ -125,6 +128,10 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("LLM_BASE_URL must be an absolute HTTP(S) URL without credentials, query or fragment")
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
+	apiMode := strings.TrimSpace(os.Getenv("LLM_API_MODE"))
+	if err := llm.ValidateAPIMode(apiMode); err != nil {
+		return nil, err
+	}
 
 	// Optional: OpenRouter Model
 	model := os.Getenv("OPENROUTER_MODEL")
@@ -237,6 +244,7 @@ func Load() (*Config, error) {
 		OpenRouterAPIKey:          apiKey,
 		LLMAPIKey:                 apiKey,
 		LLMBaseURL:                baseURL,
+		LLMAPIMode:                apiMode,
 		OpenRouterModel:           model,
 		DatingBotChatID:           DefaultDatingBotChatID,
 		DatingBotUsername:         DefaultDatingBotUsername,

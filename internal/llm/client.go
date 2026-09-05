@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +28,13 @@ var mimeTypes = map[string]string{
 }
 
 type Client struct {
+	baseURL    string
+	apiKey     string
+	mode       string
+	httpClient interface {
+		Do(*http.Request) (*http.Response, error)
+	}
+	omitTemperature      bool
 	client               *openrouter.Client
 	createChatCompletion func(context.Context, openrouter.ChatCompletionRequest) (openrouter.ChatCompletionResponse, error)
 	onMediaPartStart     func()
@@ -42,12 +48,12 @@ func NewClient(apiKey, baseURL string) *Client {
 	if baseURL != "" {
 		config.BaseURL = strings.TrimRight(baseURL, "/")
 	}
-	endpoint, _ := url.Parse(config.BaseURL)
-	if endpoint != nil && endpoint.Hostname() == "opencode.ai" && (endpoint.Path == "/zen/go/v1" || endpoint.Path == "/zen/v1") {
+	if directProvider(config.BaseURL) != "" {
 		config.HTTPClient = &openCodeHTTPClient{client: &http.Client{}, session: rand.Text()}
 	}
 	openRouterClient := openrouter.NewClientWithConfig(*config)
 	return &Client{
+		baseURL: config.BaseURL, apiKey: apiKey, httpClient: config.HTTPClient,
 		client:               openRouterClient,
 		createChatCompletion: openRouterClient.CreateChatCompletion,
 	}
@@ -112,6 +118,12 @@ func (c *Client) DecideMultimodal(ctx context.Context, model, systemPrompt strin
 }
 
 func (c *Client) createFormattedCompletion(ctx context.Context, model string, messages []openrouter.ChatCompletionMessage, temperature float64, format *openrouter.ChatCompletionResponseFormat) (string, error) {
+	if c.mode == "responses" || c.mode == "anthropic" {
+		return c.createNativeCompletion(ctx, model, messages, temperature, format)
+	}
+	if c.omitTemperature {
+		temperature = 0 // SDK omits zero temperature.
+	}
 	createChatCompletion := c.createChatCompletion
 	if createChatCompletion == nil {
 		if c.client == nil {
@@ -137,6 +149,9 @@ func (c *Client) createFormattedCompletion(ctx context.Context, model string, me
 		}
 		if len(resp.Choices) == 0 {
 			return "", tghelper.MarkRetryable(errors.New("no completion choices returned"))
+		}
+		if format != nil && resp.Choices[0].FinishReason != "" && resp.Choices[0].FinishReason != openrouter.FinishReasonStop {
+			return "", fmt.Errorf("chat completion is not final: %s", resp.Choices[0].FinishReason)
 		}
 		return resp.Choices[0].Message.Content.Text, nil
 	}, nil, opts)

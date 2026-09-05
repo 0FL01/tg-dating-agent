@@ -21,7 +21,6 @@ type ReciprocalLikeFinalPayload struct {
 	DeeplinkText      string    `json:"deeplink_text,omitempty"`
 	ProfileText       string    `json:"profile_text,omitempty"`
 	OpenerText        string    `json:"opener_text,omitempty"`
-	MBTI              string    `json:"mbti,omitempty"`
 	ContextCapturedAt time.Time `json:"context_captured_at,omitempty"`
 	EventTimestamp    time.Time `json:"event_timestamp"`
 }
@@ -137,7 +136,6 @@ func buildReciprocalLikeFinalPayload(m *telegram.NewMessage, visibleProfile Rece
 		payload.ProfileText = visibleProfile.ProfileText
 		if hasContext && reciprocalContextMatchesProfileText(latest, visibleProfile.ProfileText) {
 			payload.OpenerText = latest.OpenerText
-			payload.MBTI = latest.MBTI
 			payload.ContextCapturedAt = latest.CapturedAt
 		}
 		return payload, true
@@ -146,7 +144,6 @@ func buildReciprocalLikeFinalPayload(m *telegram.NewMessage, visibleProfile Rece
 	if hasContext {
 		payload.ProfileText = latest.ProfileText
 		payload.OpenerText = latest.OpenerText
-		payload.MBTI = latest.MBTI
 		payload.ContextCapturedAt = latest.CapturedAt
 	}
 
