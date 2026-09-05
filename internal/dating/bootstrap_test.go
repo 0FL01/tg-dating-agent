@@ -1,6 +1,7 @@
 package dating
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/0FL01/tg-dating-agent/internal/llm"
 	"github.com/0FL01/tg-dating-agent/internal/standalone"
 	"github.com/amarnathcjd/gogram/telegram"
 )
@@ -18,7 +20,17 @@ import (
 // This test uses minimal mocking - only a nil Telegram client which is acceptable
 // for verifying the bootstrap wiring without triggering actual Telegram calls.
 func TestNewStandaloneHandler_Wiring(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" || r.Header.Get("Authorization") != "Bearer configured-key" {
+			t.Error("LLM endpoint/key not wired")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer server.Close()
 	cfg := &standalone.Config{
+		LLMAPIKey:            "configured-key",
+		LLMBaseURL:           server.URL + "/v1",
 		OpenRouterAPIKey:     "test-api-key",
 		DatingBotChatID:      123456789,
 		DatingModel:          "test-model",
@@ -39,6 +51,10 @@ func TestNewStandaloneHandler_Wiring(t *testing.T) {
 
 	if handler == nil {
 		t.Fatal("NewStandaloneHandler returned nil")
+	}
+	text, err := handler.client.SummarizeMultimodal(context.Background(), handler.model, "system", llm.MultimodalContent{Text: "bio"}, 0.7)
+	if err != nil || text != "ok" {
+		t.Fatalf("configured LLM call: text=%q error=%v", text, err)
 	}
 
 	// Verify handler name for logging/debugging

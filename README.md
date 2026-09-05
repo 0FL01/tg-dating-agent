@@ -49,7 +49,7 @@
 - Go `1.25+` (для локального запуска)
 - Docker + Docker Compose (для контейнерного запуска)
 - Telegram API credentials с `https://my.telegram.org`
-- OpenRouter API key с `https://openrouter.ai`
+- API key выбранного LLM endpoint (OpenRouter, OmniRoute или OpenCode Zen/Go)
 - Telegram Bot API token для Match Forwarder (создайте через [@BotFather](https://t.me/botfather))
 
 ## Быстрый старт
@@ -67,7 +67,7 @@ cp env.example .env
 - `TG_APP_ID`
 - `TG_APP_HASH`
 - `TG_PHONE_NUMBER`
-- `OPENROUTER_API_KEY`
+- `LLM_API_KEY` (`LLM_BASE_URL` в примере указывает на OpenRouter)
 - `TG_STRING_SESSION` (рекомендуется для Docker)
 
 Для получения `TG_STRING_SESSION` выполните один раз интерактивную авторизацию:
@@ -148,18 +148,42 @@ docker compose -f docker-compose.forwarder.yml up -d --build forwarder
 
 ### Dating Agent
 
+LLM использует единый Chat Completions API для всех сервисов:
+
+| Сервис | `LLM_BASE_URL` |
+|---|---|
+| OpenRouter (default) | `https://openrouter.ai/api/v1` |
+| OmniRoute | `http://localhost:20128/v1` (или адрес вашего gateway) |
+| OpenCode Zen | `https://opencode.ai/zen/v1` |
+| OpenCode Go | `https://opencode.ai/zen/go/v1` |
+
+Задайте `LLM_API_KEY` от выбранного endpoint и `DATING_MODEL` с его API model ID
+(без CLI-префиксов `opencode/` и `opencode-go/`). Модель должна поддерживать
+Chat Completions и изображения; Responses и Anthropic Messages напрямую не поддерживаются.
+Base URL включает префикс API, но не `/chat/completions`.
+При явном `LLM_BASE_URL` legacy-ключ не подставляется, даже для OpenRouter.
+OmniRoute разворачивается отдельно; ключ gateway и upstream-маршруты настраиваются в нём.
+В текущем Linux Compose с host network локальный gateway доступен через `localhost`.
+
+[OpenCode Go](https://opencode.ai/docs/go/) ориентирован на coding agents:
+до эксплуатации подтвердите допустимость dating-нагрузки. Клиент честно указывает
+`User-Agent: tg-dating-agent` и отправляет непрозрачный `x-opencode-session`
+на прямой Go endpoint (новый ID на экземпляр клиента, без Telegram-данных).
+Наличие этих заголовков не означает разрешение провайдера на такой сценарий.
+
 **Обязательные:**
 - `TG_APP_ID` — ID приложения с https://my.telegram.org
 - `TG_APP_HASH` или `TG_APP_APP_HASH` — hash приложения
 - `TG_PHONE_NUMBER` — номер телефона для авторизации
-- `OPENROUTER_API_KEY` — ключ OpenRouter API
+- `LLM_API_KEY` — ключ выбранного LLM endpoint; старый `OPENROUTER_API_KEY` поддерживается, только если `LLM_BASE_URL` не задан
 
 **Опциональные:**
 - `TG_STRING_SESSION` — строка сессии (приоритетно)
 - `SESSION_PATH` — путь к файлу сессии (fallback, по умолчанию `session.dat`)
 - `DATING_BOT_CHAT_ID` — чат id бота знакомств (по умолчанию `1234060895`)
-- `OPENROUTER_MODEL` — базовая модель OpenRouter (по умолчанию `google/gemini-2.5-flash`)
-- `DATING_MODEL` — модель для генерации (по умолчанию `google/gemini-2.5-flash-lite-preview-06-2025`)
+- `LLM_BASE_URL` — OpenAI-compatible base URL без `/chat/completions`, по умолчанию `https://openrouter.ai/api/v1`
+- `OPENROUTER_MODEL` — legacy-настройка; dating runtime использует `DATING_MODEL`
+- `DATING_MODEL` — API model ID для MBTI и генерации (по умолчанию `google/gemini-2.5-flash-lite-preview-06-2025`)
 - `DATING_TEMPERATURE` — температура генерации (по умолчанию `0.7`)
 - `DATING_ACTION_DELAY` — задержка между действиями в секундах (по умолчанию `15s`)
 - `DATING_JITTER_DELAY` — случайный jitter в секундах (по умолчанию `5s`)

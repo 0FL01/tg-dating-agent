@@ -5,6 +5,7 @@ package standalone
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -20,7 +21,9 @@ type Config struct {
 	SessionPath   string // Path to session file (fallback if StringSession not set)
 	StringSession string // Base64-encoded session string (preferred for Docker)
 
-	// OpenRouter API
+	// OpenAI-compatible API. OpenRouterAPIKey is retained for legacy callers.
+	LLMAPIKey        string
+	LLMBaseURL       string
 	OpenRouterAPIKey string
 	OpenRouterModel  string // Model for LLM requests
 
@@ -52,6 +55,7 @@ type Config struct {
 
 // Default values for Dating configuration.
 const (
+	DefaultLLMBaseURL                      = "https://openrouter.ai/api/v1"
 	DefaultDatingBotChatID           int64 = 1234060895
 	DefaultDatingBotUsername               = "leomatchbot"
 	DefaultDatingModel                     = "google/gemini-2.5-flash-lite-preview-06-2025"
@@ -94,7 +98,7 @@ const DefaultDatingMBTIPrompt = `Ты - аналитик психотипов MB
 var defaultDatingMBTIAllowlist = []string{"INTJ", "INFJ", "ENTJ", "ENFJ"}
 
 // Load reads configuration from environment variables and returns a standalone Config.
-// Required: TG_APP_ID, TG_APP_HASH, OPENROUTER_API_KEY.
+// Required: TG_APP_ID, TG_APP_HASH, LLM_API_KEY (or legacy OPENROUTER_API_KEY).
 // Session: TG_STRING_SESSION takes precedence over SESSION_PATH.
 func Load() (*Config, error) {
 	// Required: Telegram App ID
@@ -123,11 +127,22 @@ func Load() (*Config, error) {
 	}
 	stringSession := os.Getenv("TG_STRING_SESSION")
 
-	// Required: OpenRouter API Key
-	apiKey := os.Getenv("OPENROUTER_API_KEY")
-	if apiKey == "" {
-		return nil, fmt.Errorf("OPENROUTER_API_KEY is required")
+	baseURL := strings.TrimSpace(os.Getenv("LLM_BASE_URL"))
+	apiKey := strings.TrimSpace(os.Getenv("LLM_API_KEY"))
+	if baseURL == "" {
+		baseURL = DefaultLLMBaseURL
+		if apiKey == "" {
+			apiKey = os.Getenv("OPENROUTER_API_KEY")
+		}
 	}
+	if apiKey == "" {
+		return nil, fmt.Errorf("LLM_API_KEY is required (OPENROUTER_API_KEY is supported only without LLM_BASE_URL)")
+	}
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil || parsedURL.Hostname() == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.User != nil || parsedURL.RawQuery != "" || parsedURL.ForceQuery || parsedURL.Fragment != "" || strings.Contains(baseURL, "#") {
+		return nil, fmt.Errorf("LLM_BASE_URL must be an absolute HTTP(S) URL without credentials, query or fragment")
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
 
 	// Optional: OpenRouter Model
 	model := os.Getenv("OPENROUTER_MODEL")
@@ -270,6 +285,8 @@ func Load() (*Config, error) {
 		SessionPath:               sessionPath,
 		StringSession:             stringSession,
 		OpenRouterAPIKey:          apiKey,
+		LLMAPIKey:                 apiKey,
+		LLMBaseURL:                baseURL,
 		OpenRouterModel:           model,
 		DatingBotChatID:           DefaultDatingBotChatID,
 		DatingBotUsername:         DefaultDatingBotUsername,

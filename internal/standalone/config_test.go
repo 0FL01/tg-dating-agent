@@ -12,6 +12,44 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("TG_APP_ID", "12345")
 	t.Setenv("TG_APP_HASH", "testhash")
 	t.Setenv("OPENROUTER_API_KEY", "testkey")
+	t.Setenv("LLM_API_KEY", "")
+	t.Setenv("LLM_BASE_URL", "")
+}
+
+func TestLoadLLMEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name, baseURL, key, wantURL, wantKey string
+		wantErr                              bool
+	}{
+		{name: "legacy", wantURL: DefaultLLMBaseURL, wantKey: "testkey"},
+		{name: "new key default endpoint", key: "new-key", wantURL: DefaultLLMBaseURL, wantKey: "new-key"},
+		{name: "custom", baseURL: " http://localhost:20128/prefix/v1/ ", key: "gateway-key", wantURL: "http://localhost:20128/prefix/v1", wantKey: "gateway-key"},
+		{name: "no legacy key leakage", baseURL: "https://example.com/v1", wantErr: true},
+		{name: "relative", baseURL: "/v1", key: "key", wantErr: true},
+		{name: "scheme", baseURL: "ftp://example.com/v1", key: "key", wantErr: true},
+		{name: "credentials", baseURL: "https://user:pass@example.com/v1", key: "key", wantErr: true},
+		{name: "query", baseURL: "https://example.com/v1?key=secret", key: "key", wantErr: true},
+		{name: "fragment", baseURL: "https://example.com/v1#fragment", key: "key", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("LLM_BASE_URL", tc.baseURL)
+			t.Setenv("LLM_API_KEY", tc.key)
+			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected invalid LLM configuration")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.LLMBaseURL != tc.wantURL || cfg.LLMAPIKey != tc.wantKey {
+				t.Fatal("unexpected resolved LLM configuration")
+			}
+		})
+	}
 }
 
 func TestLoadRequiredFields(t *testing.T) {

@@ -23,7 +23,11 @@ import (
 //	// ... create telegram client ...
 //	handler := dating.NewStandaloneHandler(cfg, tgClient)
 func NewStandaloneHandler(cfg *standalone.Config, tgClient *telegram.Client) *Handler {
-	client := llm.NewClient(cfg.OpenRouterAPIKey)
+	apiKey := cfg.LLMAPIKey
+	if apiKey == "" && cfg.LLMBaseURL == "" {
+		apiKey = cfg.OpenRouterAPIKey
+	}
+	client := llm.NewClient(apiKey, cfg.LLMBaseURL)
 	handler := NewHandler(cfg, client, tgClient)
 
 	var r2Store *storage.R2ObjectStore

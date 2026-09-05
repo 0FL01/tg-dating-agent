@@ -2,10 +2,13 @@ package llm
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,12 +35,33 @@ type Client struct {
 
 var _ MultimodalSummarizer = (*Client)(nil)
 
-func NewClient(apiKey string) *Client {
-	openRouterClient := openrouter.NewClient(apiKey)
+func NewClient(apiKey, baseURL string) *Client {
+	config := openrouter.DefaultConfig(apiKey)
+	if baseURL != "" {
+		config.BaseURL = strings.TrimRight(baseURL, "/")
+	}
+	endpoint, _ := url.Parse(config.BaseURL)
+	if endpoint != nil && endpoint.Hostname() == "opencode.ai" && endpoint.Path == "/zen/go/v1" {
+		config.HTTPClient = &goHTTPClient{client: &http.Client{}, session: rand.Text()}
+	}
+	openRouterClient := openrouter.NewClientWithConfig(*config)
 	return &Client{
 		client:               openRouterClient,
 		createChatCompletion: openRouterClient.CreateChatCompletion,
 	}
+}
+
+// OpenCode Go requires honest application identification and a caching session.
+type goHTTPClient struct {
+	client  *http.Client
+	session string
+}
+
+func (c *goHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set("User-Agent", "tg-dating-agent")
+	req.Header.Set("x-opencode-session", c.session)
+	return c.client.Do(req)
 }
 
 func (c *Client) SummarizeMultimodal(ctx context.Context, model, systemPrompt string, content MultimodalContent, temperature float64) (string, error) {
@@ -67,14 +91,14 @@ func (c *Client) createCompletion(ctx context.Context, model string, messages []
 	createChatCompletion := c.createChatCompletion
 	if createChatCompletion == nil {
 		if c.client == nil {
-			return "", errors.New("openrouter client is not configured")
+			return "", errors.New("llm client is not configured")
 		}
 		createChatCompletion = c.client.CreateChatCompletion
 	}
 
 	opts := tghelper.DefaultRetryOptions()
 	opts.OnRetry = func(attempt int, err error, delay time.Duration) {
-		log.Printf("[openrouter] retry %d: %v (sleep %s)", attempt, err, delay)
+		log.Printf("[llm] retry %d: %v (sleep %s)", attempt, err, delay)
 	}
 
 	return tghelper.DoRetry(ctx, func(ctx context.Context) (string, error) {

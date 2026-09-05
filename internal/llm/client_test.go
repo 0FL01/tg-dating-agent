@@ -2,14 +2,79 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/revrost/go-openrouter"
 )
+
+func TestClientCustomEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/zen/v1/chat/completions" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer custom-key" {
+			t.Error("wrong authorization")
+		}
+		var req openrouter.ChatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		if req.Model != "vision-model" || len(req.Messages) != 2 {
+			t.Error("wrong model or messages")
+			w.WriteHeader(400)
+			return
+		}
+		parts := req.Messages[1].Content.Multi
+		if len(parts) != 2 || parts[0].Text != "bio" || parts[1].ImageURL == nil || !strings.HasPrefix(parts[1].ImageURL.URL, "data:image/jpeg;base64,") {
+			t.Error("wrong multimodal content")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer server.Close()
+	image := filepath.Join(t.TempDir(), "photo.jpg")
+	if err := os.WriteFile(image, []byte("image"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient("custom-key", server.URL+"/zen/v1/")
+	text, err := client.SummarizeMultimodal(context.Background(), "vision-model", "system", MultimodalContent{Text: "bio", ImagePaths: []string{image}}, 0.7)
+	if err != nil || text != "ok" {
+		t.Fatalf("text = %q, error = %v", text, err)
+	}
+}
+
+func TestGoHTTPClientHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("User-Agent") != "tg-dating-agent" || r.Header.Get("x-opencode-session") != "opaque-session" {
+			t.Error("missing Go identification")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	client := &goHTTPClient{client: server.Client(), session: "opaque-session"}
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if req.Header.Get("x-opencode-session") != "" {
+		t.Fatal("mutated caller headers")
+	}
+}
 
 func TestSummarizeMultimodal_ContextCanceledBeforeCall(t *testing.T) {
 	t.Parallel()
