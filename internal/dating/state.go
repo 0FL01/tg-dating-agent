@@ -47,6 +47,7 @@ type ProfileData struct {
 
 // ProfileJob represents a job to process a profile from the queue
 type ProfileJob struct {
+	MessageButton    string               // active reply keyboard snapshot at reception
 	Type             string               // "message" or "album"
 	Message          *telegram.NewMessage // nil for album jobs
 	Album            *telegram.Album      // nil for message jobs
@@ -72,6 +73,8 @@ type StateMachine struct {
 	workerCancel          context.CancelFunc
 	recoveryQueued        map[string]bool
 	groupedCaptions       map[int64]groupedCaptionContext
+	activeMessageButton   string
+	activeKeyboardID      int32
 	groupedButtons        map[int64]groupedCaptionContext
 	startupOwnProfileSkip startupOwnProfileSkipContext
 	latestProfileJobID    int32
@@ -409,6 +412,8 @@ func (sm *StateMachine) BeginShutdown() {
 	sm.retryCount = 0
 	sm.ownProfileSkip = ownProfileSkipContext{}
 	sm.groupedCaptions = make(map[int64]groupedCaptionContext)
+	sm.activeMessageButton = ""
+	sm.activeKeyboardID = 0
 	sm.groupedButtons = make(map[int64]groupedCaptionContext)
 	sm.startupOwnProfileSkip = startupOwnProfileSkipContext{}
 	sm.latestProfileJobID = 0
@@ -852,31 +857,43 @@ func (sm *StateMachine) RememberGroupedCaption(groupedID int64, text string, mes
 	}
 }
 
-func (sm *StateMachine) RememberGroupedButton(groupedID int64, text string, messageID int32, now time.Time) {
+// ObserveProfileKeyboard updates persistent keyboard state and returns a snapshot
+// for this message. Older messages must never inherit a future keyboard.
+func (sm *StateMachine) ObserveProfileKeyboard(m *telegram.NewMessage) string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if sm.state == StateStopped || groupedID == 0 {
-		return
-	}
-	for id, entry := range sm.groupedButtons {
-		if now.Sub(entry.setAt) > groupedCaptionTTL {
-			delete(sm.groupedButtons, id)
-		}
-	}
-	if previous, ok := sm.groupedButtons[groupedID]; !ok || messageID >= previous.messageID {
-		sm.groupedButtons[groupedID] = groupedCaptionContext{text: text, messageID: messageID, setAt: now}
-	}
-}
-
-func (sm *StateMachine) ConsumeGroupedButton(groupedID int64, maxMessageID int32, now time.Time) string {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	entry, ok := sm.groupedButtons[groupedID]
-	delete(sm.groupedButtons, groupedID)
-	if !ok || now.Sub(entry.setAt) > groupedCaptionTTL || entry.messageID > maxMessageID {
+	if sm.state == StateStopped || m == nil || m.Message == nil {
 		return ""
 	}
-	return entry.text
+	if m.ID < sm.activeKeyboardID {
+		if entry, ok := sm.groupedButtons[m.Message.GroupedID]; ok && entry.messageID <= m.ID {
+			return entry.text
+		}
+		return ""
+	}
+	switch m.Message.ReplyMarkup.(type) {
+	case *telegram.ReplyKeyboardMarkup:
+		sm.activeMessageButton, _ = profileMessageButtonText(m)
+		sm.activeKeyboardID = m.ID
+	case *telegram.ReplyKeyboardHide:
+		sm.activeMessageButton = ""
+		sm.activeKeyboardID = m.ID
+		// Nil/inline markup and force-reply do not replace the custom keyboard.
+	}
+	if m.Message.GroupedID != 0 {
+		// Album callbacks are delayed: retain the reception snapshot even if a
+		// newer menu arrives before the assembled album. Only snapshots expire.
+		now := time.Now()
+		for id, entry := range sm.groupedButtons {
+			if now.Sub(entry.setAt) > groupedCaptionTTL {
+				delete(sm.groupedButtons, id)
+			}
+		}
+		if entry, ok := sm.groupedButtons[m.Message.GroupedID]; !ok || m.ID >= entry.messageID {
+			sm.groupedButtons[m.Message.GroupedID] = groupedCaptionContext{text: sm.activeMessageButton, messageID: m.ID, setAt: now}
+		}
+	}
+	return sm.activeMessageButton
 }
 
 func (sm *StateMachine) ConsumeGroupedCaption(groupedID int64, now time.Time) (string, bool) {

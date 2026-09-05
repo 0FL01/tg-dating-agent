@@ -164,6 +164,7 @@ func (h *Handler) Filter() func(*telegram.NewMessage) bool {
 // Handle processes incoming messages from the dating bot
 func (h *Handler) Handle(m *telegram.NewMessage) error {
 	h.cacheBotPeer(m)
+	messageButton := h.state.ObserveProfileKeyboard(m)
 
 	if h.state.IsStopped() {
 		return nil
@@ -179,10 +180,6 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 	}
 
 	h.rememberGroupedCaption(m, text)
-	if m.Message != nil && m.Message.GroupedID != 0 && hasReplyMarkup(m) {
-		button, _ := profileMessageButtonText(m)
-		h.state.RememberGroupedButton(m.Message.GroupedID, button, m.ID, time.Now())
-	}
 	log.Printf("[%s] Received message: %s...", h.Name(), utils.Truncate(text, 50))
 
 	if isPremiumPurchaseMessage(text) {
@@ -268,7 +265,7 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 			return nil
 		}
 		h.rememberVisibleProfileMessage(m.Text(), m.ID, m)
-		if !h.state.Enqueue(ProfileJob{Type: "message", Message: m, ProfileMessageID: m.ID}) {
+		if !h.state.Enqueue(ProfileJob{Type: "message", Message: m, ProfileMessageID: m.ID, MessageButton: messageButton}) {
 			log.Printf("[%s] Queue full, skipping profile", h.Name())
 		} else {
 			h.state.ResetStuckRecoveryEscalation()
@@ -286,7 +283,7 @@ func (h *Handler) Handle(m *telegram.NewMessage) error {
 		}
 
 		h.rememberVisibleProfileCard(text, m.ID)
-		if !h.state.Enqueue(ProfileJob{Type: "message", Message: m, ProfileMessageID: m.ID}) {
+		if !h.state.Enqueue(ProfileJob{Type: "message", Message: m, ProfileMessageID: m.ID, MessageButton: messageButton}) {
 			log.Printf("[%s] Queue full, skipping text-only profile", h.Name())
 		} else {
 			h.state.ResetStuckRecoveryEscalation()
@@ -445,18 +442,18 @@ func isDailyLimitMessage(text string) bool {
 	return hasTodayCue && hasInviteCue
 }
 
-func (h *Handler) processProfile(ctx context.Context, m *telegram.NewMessage) error {
+func (h *Handler) processProfile(ctx context.Context, m *telegram.NewMessage, messageButton string) error {
 	if !h.state.SetStateIfNotStopped(StateViewingProfiles) {
 		return nil
 	}
 
-	data, cleanup := h.downloadProfileData(ctx, m)
+	data, cleanup := h.downloadProfileData(ctx, m, messageButton)
 	defer cleanup()
 
 	return h.generateAndSendLike(ctx, data)
 }
 
-func (h *Handler) downloadProfileData(ctx context.Context, m *telegram.NewMessage) (ProfileData, func()) {
+func (h *Handler) downloadProfileData(ctx context.Context, m *telegram.NewMessage, messageButton string) (ProfileData, func()) {
 	var data ProfileData
 	var photoPaths []string
 
@@ -472,7 +469,7 @@ func (h *Handler) downloadProfileData(ctx context.Context, m *telegram.NewMessag
 	data.PhotoPaths = photoPaths
 	data.PhotoIdentifiers = photoIdentifiersFromMessage(m)
 	data.ProfileText = m.Text()
-	data.MessageButton, _ = profileMessageButtonText(m)
+	data.MessageButton = messageButton
 	data.ProfileMessageID = m.ID
 
 	log.Printf("[%s] Profile text: %s", h.Name(), utils.Truncate(data.ProfileText, 100))
@@ -1037,6 +1034,24 @@ func (h *Handler) sendStartCommand(ctx context.Context) error {
 
 func (h *Handler) HandleAlbum(a *telegram.Album) error {
 	h.cacheBotPeerFromAlbum(a)
+	var messageButton string
+	if a != nil {
+		messages := append([]*telegram.NewMessage(nil), a.Messages...)
+		sort.SliceStable(messages, func(i, j int) bool {
+			if messages[i] == nil {
+				return messages[j] != nil
+			}
+			if messages[j] == nil {
+				return false
+			}
+			return messages[i].ID < messages[j].ID
+		})
+		for _, m := range messages {
+			if m != nil {
+				messageButton = h.state.ObserveProfileKeyboard(m)
+			}
+		}
+	}
 
 	if h.state.IsStopped() {
 		return nil
@@ -1066,7 +1081,7 @@ func (h *Handler) HandleAlbum(a *telegram.Album) error {
 	}
 
 	// Add to queue instead of direct processing
-	if !h.state.Enqueue(ProfileJob{Type: "album", Album: a, ProfileMessageID: maxAlbumMessageID(a)}) {
+	if !h.state.Enqueue(ProfileJob{Type: "album", Album: a, ProfileMessageID: maxAlbumMessageID(a), MessageButton: messageButton}) {
 		log.Printf("[%s] Queue full, skipping album", h.Name())
 	} else {
 		h.state.ResetStuckRecoveryEscalation()
@@ -1075,7 +1090,7 @@ func (h *Handler) HandleAlbum(a *telegram.Album) error {
 }
 
 // handleAlbumJob performs actual album processing (inside worker)
-func (h *Handler) handleAlbumJob(ctx context.Context, a *telegram.Album) error {
+func (h *Handler) handleAlbumJob(ctx context.Context, a *telegram.Album, messageButton string) error {
 	h.cacheBotPeerFromAlbum(a)
 
 	profileText := h.resolveAlbumProfileText(a)
@@ -1083,7 +1098,7 @@ func (h *Handler) handleAlbumJob(ctx context.Context, a *telegram.Album) error {
 		return nil
 	}
 
-	data, cleanup := h.downloadAlbumData(ctx, a, profileText)
+	data, cleanup := h.downloadAlbumData(ctx, a, profileText, messageButton)
 	defer cleanup()
 
 	log.Printf("[%s] Album: %d photos, text: %s", h.Name(), len(data.PhotoPaths), utils.Truncate(data.ProfileText, 100))
@@ -1104,7 +1119,7 @@ func (h *Handler) processJob(ctx context.Context, job ProfileJob) error {
 			return nil
 		}
 		h.state.ResetStuckRecoveryEscalation()
-		return h.processProfile(ctx, job.Message)
+		return h.processProfile(ctx, job.Message, job.MessageButton)
 	case "album":
 		if job.Album == nil {
 			return nil
@@ -1115,7 +1130,7 @@ func (h *Handler) processJob(ctx context.Context, job ProfileJob) error {
 			return nil
 		}
 		h.state.ResetStuckRecoveryEscalation()
-		return h.handleAlbumJob(ctx, job.Album)
+		return h.handleAlbumJob(ctx, job.Album, job.MessageButton)
 	case "premium_recovery":
 		return h.recoverPremiumPurchase(ctx, job.Message)
 	case "menu_recovery":
@@ -1708,7 +1723,7 @@ func (h *Handler) ensureBotPeer(ctx context.Context) (telegram.InputPeer, error)
 	return peer, nil
 }
 
-func (h *Handler) downloadAlbumData(ctx context.Context, a *telegram.Album, profileText string) (ProfileData, func()) {
+func (h *Handler) downloadAlbumData(ctx context.Context, a *telegram.Album, profileText, messageButton string) (ProfileData, func()) {
 	var data ProfileData
 	var photoPaths []string
 
@@ -1727,14 +1742,7 @@ func (h *Handler) downloadAlbumData(ctx context.Context, a *telegram.Album, prof
 	data.PhotoIdentifiers = photoIdentifiersFromAlbum(a)
 	data.ProfileText = profileText
 	data.ProfileMessageID = maxAlbumMessageID(a)
-	data.MessageButton = h.state.ConsumeGroupedButton(firstAlbumGroupedID(a), data.ProfileMessageID, time.Now())
-	var markupMessageID int32
-	for _, msg := range a.Messages {
-		if hasReplyMarkup(msg) && msg.ID >= markupMessageID {
-			data.MessageButton, _ = profileMessageButtonText(msg)
-			markupMessageID = msg.ID
-		}
-	}
+	data.MessageButton = messageButton
 
 	cleanup := func() {
 		for _, path := range photoPaths {

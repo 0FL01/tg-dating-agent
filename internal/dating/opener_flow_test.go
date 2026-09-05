@@ -2,8 +2,8 @@ package dating
 
 import (
 	"context"
+	"sync"
 	"testing"
-	"time"
 
 	"github.com/amarnathcjd/gogram/telegram"
 )
@@ -80,7 +80,7 @@ func TestProfileMessageKeyboardSafety(t *testing.T) {
 			t.Fatalf("label=%q got=%q ok=%v", label, got, ok)
 		}
 		h := &Handler{state: NewStateMachine()}
-		data, cleanup := h.downloadProfileData(context.Background(), m)
+		data, cleanup := h.downloadProfileData(context.Background(), m, h.state.ObserveProfileKeyboard(m))
 		cleanup()
 		if data.MessageButton != label {
 			t.Fatalf("single profile lost label: %q", data.MessageButton)
@@ -90,7 +90,7 @@ func TestProfileMessageKeyboardSafety(t *testing.T) {
 		h := &Handler{state: NewStateMachine(), client: &scriptedSummarizer{responses: []string{`{"action":"send","reason":"fit","message":"Favorite trail?"}`}}}
 		h.clickButtonFn = func(context.Context, string) error { t.Fatal("sent command with unusable keyboard"); return nil }
 		m := &telegram.NewMessage{ID: 10, Message: &telegram.MessageObj{ReplyMarkup: markup}}
-		data, cleanup := h.downloadProfileData(context.Background(), m)
+		data, cleanup := h.downloadProfileData(context.Background(), m, h.state.ObserveProfileKeyboard(m))
 		cleanup()
 		if err := h.generateAndSendLike(context.Background(), data); err != nil {
 			t.Fatal(err)
@@ -101,18 +101,137 @@ func TestProfileMessageKeyboardSafety(t *testing.T) {
 	}
 }
 
-func TestGroupedButtonCorrelation(t *testing.T) {
+func TestPersistentProfileKeyboard(t *testing.T) {
+	const label = "\U0001f48c \U0001f4f9 \U0001f3a4"
+	for _, tc := range []struct {
+		name   string
+		markup telegram.ReplyMarkup
+		want   string
+	}{
+		{"absent", nil, label},
+		{"inline", &telegram.ReplyInlineMarkup{}, label},
+		{"force reply", &telegram.ReplyKeyboardForceReply{}, label},
+		{"hide", &telegram.ReplyKeyboardHide{}, ""},
+		{"menu", openerKeyboard("unrelated"), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sm := NewStateMachine()
+			observe := func(id int32, markup telegram.ReplyMarkup) string {
+				return sm.ObserveProfileKeyboard(&telegram.NewMessage{ID: id, Message: &telegram.MessageObj{ReplyMarkup: markup}})
+			}
+			if got := observe(100, openerKeyboard(label)); got != label {
+				t.Fatal(got)
+			}
+			if got := observe(101, tc.markup); got != tc.want {
+				t.Fatalf("got %q want %q", got, tc.want)
+			}
+			if got := observe(900000, nil); got != tc.want {
+				t.Fatalf("persistent snapshot = %q", got)
+			}
+			if got := observe(99, openerKeyboard(label)); got != "" {
+				t.Fatal("future keyboard applied to stale card")
+			}
+			if got := observe(900001, nil); got != tc.want {
+				t.Fatal("stale keyboard replaced current state")
+			}
+			sm.BeginShutdown()
+			if got := observe(900002, openerKeyboard(label)); got != "" {
+				t.Fatal("shutdown retained keyboard")
+			}
+		})
+	}
+}
+
+func TestPersistentKeyboardSequentialCards(t *testing.T) {
+	const label = "\U0001f48c \U0001f4f9 \U0001f3a4"
+	h := &Handler{state: NewStateMachine(), client: &scriptedSummarizer{responses: []string{
+		`{"action":"skip","reason":"not fit","message":""}`,
+		`{"action":"send","reason":"fit","message":"Favorite trail?"}`,
+		`{"action":"send","reason":"fit","message":"Favorite book?"}`,
+	}}}
+	var buttons []string
+	h.clickButtonFn = func(_ context.Context, text string) error { buttons = append(buttons, text); return nil }
+	first := &telegram.NewMessage{ID: 100, Message: &telegram.MessageObj{Message: "First card", ReplyMarkup: openerKeyboard(label)}}
+	if err := h.Handle(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.processJob(context.Background(), mustDequeueJob(t, h.state)); err != nil {
+		t.Fatal(err)
+	}
+	second := &telegram.NewMessage{ID: 110, Message: &telegram.MessageObj{Media: &telegram.MessageMediaPhoto{}}}
+	if err := h.Handle(second); err != nil {
+		t.Fatal(err)
+	}
+	job := mustDequeueJob(t, h.state)
+	// A newer menu must invalidate future cards, not mutate an already queued snapshot.
+	if err := h.Handle(&telegram.NewMessage{ID: 111, Message: &telegram.MessageObj{ReplyMarkup: openerKeyboard("unrelated")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.processJob(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	if len(buttons) != 2 || buttons[0] != ButtonDislike || buttons[1] != label {
+		t.Fatalf("buttons = %q", buttons)
+	}
+	third := &telegram.NewMessage{ID: 112, Message: &telegram.MessageObj{Message: "Third card", Media: &telegram.MessageMediaPhoto{}}}
+	if err := h.Handle(third); err != nil {
+		t.Fatal(err)
+	}
+	job = mustDequeueJob(t, h.state)
+	if job.MessageButton != "" {
+		t.Fatalf("menu failed to invalidate: %q", job.MessageButton)
+	}
+	if err := h.processJob(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	if !h.IsStopped() || len(buttons) != 2 {
+		t.Fatalf("invalid keyboard used: stopped=%v buttons=%q", h.IsStopped(), buttons)
+	}
+}
+
+func TestAlbumKeyboardReceptionSnapshot(t *testing.T) {
+	const label = "\U0001f48c \U0001f4f9 \U0001f3a4"
+	h := &Handler{state: NewStateMachine()}
+	h.state.ObserveProfileKeyboard(&telegram.NewMessage{ID: 90, Message: &telegram.MessageObj{ReplyMarkup: openerKeyboard(label)}})
+	part := &telegram.NewMessage{ID: 100, Message: &telegram.MessageObj{GroupedID: 42, Message: "Album card"}}
+	if err := h.Handle(part); err != nil {
+		t.Fatal(err)
+	}
+	h.state.ObserveProfileKeyboard(&telegram.NewMessage{ID: 110, Message: &telegram.MessageObj{ReplyMarkup: openerKeyboard("unrelated")}})
+	if err := h.HandleAlbum(&telegram.Album{Messages: []*telegram.NewMessage{part}}); err != nil {
+		t.Fatal(err)
+	}
+	job := mustDequeueJob(t, h.state)
+	if job.MessageButton != label {
+		t.Fatalf("delayed album lost reception snapshot: %q", job.MessageButton)
+	}
+	data, cleanup := h.downloadAlbumData(context.Background(), job.Album, "Album card", job.MessageButton)
+	defer cleanup()
+	if data.MessageButton != label {
+		t.Fatalf("prepared album snapshot: %q", data.MessageButton)
+	}
+	stale := &telegram.NewMessage{ID: 99, Message: &telegram.MessageObj{GroupedID: 43}}
+	if got := h.state.ObserveProfileKeyboard(stale); got != "" {
+		t.Fatalf("future/cross-album keyboard: %q", got)
+	}
+}
+
+func TestPersistentKeyboardConcurrentUpdates(t *testing.T) {
 	sm := NewStateMachine()
-	now := time.Now()
-	sm.RememberGroupedButton(42, "label", 100, now)
-	if got := sm.ConsumeGroupedButton(43, 100, now); got != "" {
-		t.Fatal("cross-album label")
+	var wg sync.WaitGroup
+	for id := int32(1); id <= 64; id++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			markup := openerKeyboard(ButtonLikeMessage)
+			if id == 64 {
+				markup = &telegram.ReplyKeyboardHide{}
+			}
+			sm.ObserveProfileKeyboard(&telegram.NewMessage{ID: id, Message: &telegram.MessageObj{ReplyMarkup: markup}})
+		}()
 	}
-	if got := sm.ConsumeGroupedButton(42, 99, now); got != "" {
-		t.Fatal("future label")
-	}
-	sm.RememberGroupedButton(42, "label", 100, now)
-	if got := sm.ConsumeGroupedButton(42, 100, now.Add(groupedCaptionTTL+time.Second)); got != "" {
-		t.Fatal("expired label")
+	wg.Wait()
+	if got := sm.ObserveProfileKeyboard(&telegram.NewMessage{ID: 65, Message: &telegram.MessageObj{}}); got != "" {
+		t.Fatalf("older concurrent keyboard replaced latest hide: %q", got)
 	}
 }
