@@ -34,7 +34,10 @@ type replyAuditRecord struct {
 	llm.Decision
 	Model       string `json:"model"`
 	ProfileText string `json:"profile_text"`
-	Prompt      string `json:"prompt"`
+	// PhotoIdentifiers rebuilds the content cache key after restarts.
+	// Absent in older records, which then match text-only profiles.
+	PhotoIdentifiers []string `json:"photo_identifiers,omitempty"`
+	Prompt           string   `json:"prompt"`
 }
 
 func NewReplyAuditLogger(path string) *ReplyAuditLogger {

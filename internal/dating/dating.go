@@ -83,7 +83,7 @@ func NewHandler(cfg *standalone.Config, client llm.MultimodalDecider, tgClient *
 		replyAudit = newReplyAuditAppender(cfg.DatingReplyAuditLogPath)
 	}
 
-	return &Handler{
+	handler := &Handler{
 		config:          cfg,
 		client:          client,
 		replyAudit:      replyAudit,
@@ -99,6 +99,10 @@ func NewHandler(cfg *standalone.Config, client llm.MultimodalDecider, tgClient *
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
 	}
+	if n := restoreProfileDecisions(handler.state, cfg.DatingReplyAuditLogPath); n > 0 {
+		log.Printf("[dating] Restored %d profile decisions from audit log", n)
+	}
+	return handler
 }
 
 func newReplyAuditAppender(path string) replyAuditAppender {
@@ -854,7 +858,7 @@ func (h *Handler) appendReplyAudit(event string, decision llm.Decision, data Pro
 		return
 	}
 
-	if err := h.replyAudit.Append(replyAuditRecord{Event: event, Decision: decision, Model: h.model, ProfileText: data.ProfileText, Prompt: data.Prompt, Error: detail}); err != nil {
+	if err := h.replyAudit.Append(replyAuditRecord{Event: event, Decision: decision, Model: h.model, ProfileText: data.ProfileText, PhotoIdentifiers: data.PhotoIdentifiers, Prompt: data.Prompt, Error: detail}); err != nil {
 		log.Printf("[%s] Reply audit append failed: %v", h.Name(), err)
 	}
 }

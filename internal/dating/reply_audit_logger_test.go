@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -364,7 +365,7 @@ func TestAuditEventsPersistToLocalAndR2(t *testing.T) {
 			t.Fatal(err)
 		}
 		local.Timestamp, remote.Timestamp = "", ""
-		if local != remote || local.Event != event || local.Model != "model" {
+		if !reflect.DeepEqual(local, remote) || local.Event != event || local.Model != "model" {
 			t.Fatalf("local=%+v remote=%+v", local, remote)
 		}
 		if (event == "error" || event == "invalid_response") && (local.Error == "" || local.Decision != (llm.Decision{})) {
